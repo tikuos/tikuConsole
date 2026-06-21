@@ -150,6 +150,9 @@ class TikuConsole(Gtk.Application):
         # SLIP demux state
         self.in_frame = False
         self.frame = bytearray()
+        # traffic-light status: board SLIP enabled / host NAT (Internet) active
+        self.slip_on = False
+        self.nat_on = False
         # counters
         self.fr_in = self.fr_out = self.by_in = self.by_out = 0
         # ping
@@ -257,6 +260,11 @@ class TikuConsole(Gtk.Application):
         nbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         nbox.set_size_request(340, -1)
         nbox.append(self._h("Networking (SLIP/IP over the wire)"))
+        ledrow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
+        self.slip_led = Gtk.Label(); self.slip_led.set_xalign(0)
+        self.nat_led = Gtk.Label(); self.nat_led.set_xalign(0)
+        ledrow.append(self.slip_led); ledrow.append(self.nat_led)
+        nbox.append(ledrow)
         self.net_hint = Gtk.Label(); self.net_hint.set_xalign(0)
         self.net_hint.set_wrap(True); self.net_hint.set_visible(False)
         nbox.append(self.net_hint)
@@ -268,6 +276,14 @@ class TikuConsole(Gtk.Application):
         nbox.append(self.tun_lbl)
         self.cnt_lbl = Gtk.Label(label="frames in/out: 0/0   bytes: 0/0")
         self.cnt_lbl.set_xalign(0); nbox.append(self.cnt_lbl)
+
+        nbox.append(self._h("Internet (NAT: board → internet)"))
+        natb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        natb.append(Gtk.Label(label="enable"))
+        self.nat = Gtk.Switch(); self.nat.set_valign(Gtk.Align.CENTER)
+        self.nat.set_sensitive(False)
+        self.nat.connect("state-set", self.on_nat); natb.append(self.nat)
+        nbox.append(natb)
 
         nbox.append(self._h("Ping (host kernel → via tun0)"))
         pb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
@@ -291,15 +307,23 @@ class TikuConsole(Gtk.Application):
         self.ping_ok = self.ping_buf.create_tag("ok", foreground=GREEN)
         self.ping_bad = self.ping_buf.create_tag("bad", foreground="#ff6b6b")
         psw.set_child(self.ping_view); nbox.append(psw)
-
-        nbox.append(self._h("Internet (NAT: board → internet)"))
-        natb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        natb.append(Gtk.Label(label="enable"))
-        self.nat = Gtk.Switch(); self.nat.set_valign(Gtk.Align.CENTER)
-        self.nat.set_sensitive(False)
-        self.nat.connect("state-set", self.on_nat); natb.append(self.nat)
-        nbox.append(natb)
+        self._update_leds()                        # initial state (both off)
         return nbox
+
+    def _update_leds(self):
+        """Refresh the two traffic-light dots: board SLIP + host Internet/NAT."""
+        self.slip_led.set_markup(self._led(self.slip_on, "SLIP"))
+        self.nat_led.set_markup(self._led(self.nat_on, "Internet"))
+
+    @staticmethod
+    def _led(on, text):
+        return ("<span foreground='%s'>●</span> %s"
+                % (GREEN if on else "#ff6b6b", text))
+
+    def _set_slip_led(self, on):
+        if on != self.slip_on:                     # driven by the board's own msgs
+            self.slip_on = on
+            self._update_leds()
 
     def _h(self, text):
         lbl = Gtk.Label(label=text); lbl.set_xalign(0)
@@ -463,6 +487,7 @@ class TikuConsole(Gtk.Application):
             GLib.source_remove(self.ser_src); self.ser_src = 0
         self._net_down()
         self.ping_active = False                    # cancel any in-flight ping
+        self.slip_on = False; self._update_leds()   # both indicators off
         if self.ser is not None:
             try:
                 self.ser.close()
@@ -613,6 +638,10 @@ class TikuConsole(Gtk.Application):
     _CSI = re.compile(r"\x1b\[([0-9;]*)([A-Za-z])")
 
     def append(self, text):
+        if "SLIP off --" in text:                  # the board's own status lines
+            self._set_slip_led(False)
+        elif "SLIP on." in text:
+            self._set_slip_led(True)
         s = self.ansi_pending + text
         self.ansi_pending = ""
         # Stash a trailing, incomplete escape for the next chunk.
@@ -840,6 +869,7 @@ class TikuConsole(Gtk.Application):
                             "MASQUERADE + FORWARD)\n" % wan)
                 self._set_status("NAT on via %s -- ping 8.8.8.8 from the board"
                                  % wan)
+                self.nat_on = True
             else:
                 for cmd in rules:
                     try:
@@ -848,6 +878,7 @@ class TikuConsole(Gtk.Application):
                         pass
                 self.append("[nat] OFF\n")
                 self._set_status("NAT off")
+                self.nat_on = False
         except Exception as e:
             detail = ""
             err = getattr(e, "stderr", None)
@@ -856,6 +887,8 @@ class TikuConsole(Gtk.Application):
                     else str(err)
             self.append("[nat] ERROR via %s: %s\n" % (wan, (detail or str(e)).strip()))
             self._set_status("NAT error -- see console", err=True)
+            self.nat_on = False
+        self._update_leds()
         return False
 
     # ---- helpers ----------------------------------------------------------
