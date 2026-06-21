@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""TikuConsole - GTK4 serial console for TikuOS devices (a picocom replacement).
+"""
+TikuConsole v0.01
+Simple. Ubiquitous. Intelligence, Everywhere.
+http://tiku-os.org
+
+Authors: Ambuj Varshney <ambuj@tiku-os.org>
+
+tikuconsole.py - GTK4 serial console for TikuOS devices (a picocom replacement)
 
 A branded desktop terminal for any TikuOS board.  It auto-detects the serial
 port, the platform (MSP430 / RP2350 / Apollo) and its baud, then gives you a
@@ -7,18 +14,29 @@ colour console you can type straight into -- no picocom/minicom needed.
 
 Flip on "Networking" and it additionally brings up SLIP/IP over the very same
 wire: a TUN interface (so the Linux kernel's own ping/curl ride it), a ping
-panel, and board->internet NAT.  That mode is the GUI twin of tools/slmux.py
-and reuses its SLIP framing so the two stay in sync.
+panel with a rootless ICMP-over-SLIP board pinger, and board->internet NAT.
+That mode is the GUI twin of slmux.py and reuses its SLIP framing.
 
-  python3 tools/tikuconsole.py          # plain console -- no root needed
-  sudo python3 tools/tikuconsole.py     # required only for Networking mode
+  python3 tikuconsole.py          # plain console -- no root needed
+  sudo python3 tikuconsole.py     # only for the host TUN/NAT bridge
 
 Headless smoke test (build the window and quit):
-  TIKUCONSOLE_SMOKE_MS=1200 xvfb-run -a python3 tools/tikuconsole.py
+  TIKUCONSOLE_SMOKE_MS=1200 xvfb-run -a python3 tikuconsole.py
 List detected ports + platform guesses and exit (no display needed):
-  TIKUCONSOLE_SCAN=1 python3 tools/tikuconsole.py
+  TIKUCONSOLE_SCAN=1 python3 tikuconsole.py
 
-Authors: Ambuj Varshney <ambuj@tiku-os.org>
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
 SPDX-License-Identifier: Apache-2.0
 """
 import os
@@ -135,6 +153,7 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gtk, Gdk, GLib, Pango  # noqa: E402
 
 GREEN = "#8ae234"
+TIKUCONSOLE_VERSION = "0.01"
 
 
 class TikuConsole(Gtk.Application):
@@ -153,6 +172,7 @@ class TikuConsole(Gtk.Application):
         # traffic-light status: board SLIP enabled / host NAT (Internet) active
         self.slip_on = False
         self.nat_on = False
+        self.slip_scan = ""              # rolling console tail for SLIP detection
         # counters
         self.fr_in = self.fr_out = self.by_in = self.by_out = 0
         # ping
@@ -162,6 +182,10 @@ class TikuConsole(Gtk.Application):
         self.ping_seq_t = {}                  # seq -> send time (monotonic)
         self.ping_rtts = []
         self.ping_sent = self.ping_recv = 0
+        self.ping_target = BOARD_IP           # last target IP (for the animation)
+        self.ping_anim_phase = 0.0
+        self.ping_anim_src = 0
+        self.ping_pulse = 0                   # board glyph glows briefly on reply
 
     # ---- UI ---------------------------------------------------------------
     def do_activate(self):
@@ -169,19 +193,37 @@ class TikuConsole(Gtk.Application):
         win.set_default_size(960, 600)
         win.set_titlebar(Gtk.HeaderBar())          # window controls incl. maximize
         self.win = win
+        try:                                       # window / taskbar icon
+            here = os.path.dirname(os.path.abspath(__file__))
+            theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
+            theme.add_search_path(os.path.join(here, "logo"))
+            win.set_icon_name("org.tikuos.tikuconsole")
+        except Exception:
+            pass
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         for m in ("top", "bottom", "start", "end"):
             getattr(root, "set_margin_" + m)(8)
         win.set_child(root)
 
-        # --- banner (TikuBench-style markup) ---
-        banner = Gtk.Label(); banner.set_xalign(0)
+        # --- banner row: title (left) + status lights (right) ---
+        brow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        banner = Gtk.Label(); banner.set_xalign(0); banner.set_hexpand(True)
         banner.set_markup(
             "<span size='xx-large' weight='bold' foreground='%s'>TikuConsole"
-            "</span>\n<span size='small' foreground='#888888'>serial console "
-            "for TikuOS devices  ·  networking optional</span>" % GREEN)
-        root.append(banner)
+            "</span>  <span size='small' foreground='#888888'>v%s</span>\n"
+            "<span size='small' foreground='#888888'>serial console for "
+            "TikuOS devices  ·  networking optional</span>"
+            % (GREEN, TIKUCONSOLE_VERSION))
+        brow.append(banner)
+        leds = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        leds.set_valign(Gtk.Align.CENTER); leds.set_halign(Gtk.Align.END)
+        self.usb_led = Gtk.Label(); self.slip_led = Gtk.Label()
+        self.nat_led = Gtk.Label()
+        for _l in (self.usb_led, self.slip_led, self.nat_led):
+            leds.append(_l)
+        brow.append(leds)
+        root.append(brow)
 
         # --- connection bar ---
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -237,10 +279,6 @@ class TikuConsole(Gtk.Application):
         win.add_controller(kc)
         self.cview.set_can_focus(True)
         cbox.append(sw)
-        self.cin = Gtk.Entry(
-            placeholder_text="optional -- or just click the console above and type")
-        self.cin.set_sensitive(False); self.cin.connect("activate", self.on_send)
-        cbox.append(self.cin)
         mainrow.append(cbox)
 
         self.netpanel = self._build_netpanel()
@@ -249,22 +287,89 @@ class TikuConsole(Gtk.Application):
 
         GLib.timeout_add(500, self._refresh_counters)
         self.refresh_ports()
-        win.present()
-        self.cview.grab_focus()
+        self._update_leds()                        # initial light state (all off)
 
         smoke = os.environ.get("TIKUCONSOLE_SMOKE_MS")
+        if smoke or os.environ.get("TIKUCONSOLE_NO_SPLASH"):
+            win.present(); self.cview.grab_focus()  # straight to the main window
+        else:
+            self._show_splash()                     # presents win when it finishes
         if smoke:
             GLib.timeout_add(int(smoke), lambda: (self.quit(), False)[1])
+
+    def _show_splash(self):
+        """TikuBench-style splash: brand accent, logo, title, license and a
+        brief loading bar, then present the main window.  Logos live under
+        logo/; a bold 'TikuOS' label stands in if they are missing."""
+        here = os.path.dirname(os.path.abspath(__file__))
+        sp = Gtk.ApplicationWindow(application=self)
+        sp.set_decorated(False); sp.set_resizable(False)
+        sp.set_default_size(460, 520); sp.add_css_class("splash")
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        sp.set_child(outer)
+        accent = Gtk.Box(); accent.add_css_class("splash-accent")
+        accent.set_size_request(-1, 7); outer.append(accent)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.add_css_class("splash-body")
+        box.set_valign(Gtk.Align.CENTER); box.set_halign(Gtk.Align.CENTER)
+        box.set_vexpand(True); outer.append(box)
+        tlogo = os.path.join(here, "logo", "tikuos.jpeg")
+        if os.path.exists(tlogo):
+            pic = Gtk.Picture.new_for_filename(tlogo)
+            pic.set_content_fit(Gtk.ContentFit.CONTAIN)
+            pic.set_size_request(140, 140); pic.set_halign(Gtk.Align.CENTER)
+            box.append(pic)
+        else:
+            art = Gtk.Label()
+            art.set_markup("<span size='xx-large' weight='bold' "
+                           "foreground='#14457f'>TikuOS</span>")
+            box.append(art)
+        title = Gtk.Label(label="TikuConsole"); title.add_css_class("splash-title")
+        box.append(title)
+        sub = Gtk.Label(); sub.add_css_class("splash-sub")
+        sub.set_markup("serial console for "
+                       "<span foreground='#2e7d32'><b>TikuOS</b></span> devices"
+                       "  ·  v%s" % TIKUCONSOLE_VERSION)
+        box.append(sub)
+        box.append(Gtk.Label(label=""))
+        au = Gtk.Label(label="Ambuj Varshney"); au.add_css_class("splash-author")
+        box.append(au)
+        lic = Gtk.Label(label="© TikuOS · Licensed under Apache-2.0")
+        lic.add_css_class("splash-lic"); box.append(lic)
+        box.append(Gtk.Label(label=""))
+        lrow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        lrow.set_halign(Gtk.Align.CENTER)
+        spin = Gtk.Spinner(); spin.start(); lrow.append(spin)
+        self._splash_load = Gtk.Label(label="Loading")
+        self._splash_load.add_css_class("splash-load"); lrow.append(self._splash_load)
+        box.append(lrow)
+        self._splash_prog = Gtk.ProgressBar()
+        self._splash_prog.set_size_request(300, -1)
+        self._splash_prog.set_margin_top(4); box.append(self._splash_prog)
+        wlogo = os.path.join(here, "logo", "weiser.png")
+        if os.path.exists(wlogo):
+            wp = Gtk.Picture.new_for_filename(wlogo)
+            wp.set_content_fit(Gtk.ContentFit.CONTAIN)
+            wp.set_size_request(170, 96); wp.set_halign(Gtk.Align.CENTER)
+            wp.set_margin_top(10); box.append(wp)
+        self._splash = sp; self._splash_ticks = 0
+        sp.present()
+        GLib.timeout_add(140, self._splash_tick)
+
+    def _splash_tick(self):
+        self._splash_ticks += 1
+        self._splash_load.set_text("Loading" + "." * (self._splash_ticks & 3))
+        self._splash_prog.set_fraction(min(1.0, self._splash_ticks / 16.0))
+        if self._splash_ticks >= 16:
+            self.win.present(); self.cview.grab_focus()
+            self._splash.destroy()
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
 
     def _build_netpanel(self):
         nbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         nbox.set_size_request(340, -1)
         nbox.append(self._h("Networking (SLIP/IP over the wire)"))
-        ledrow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
-        self.slip_led = Gtk.Label(); self.slip_led.set_xalign(0)
-        self.nat_led = Gtk.Label(); self.nat_led.set_xalign(0)
-        ledrow.append(self.slip_led); ledrow.append(self.nat_led)
-        nbox.append(ledrow)
         self.net_hint = Gtk.Label(); self.net_hint.set_xalign(0)
         self.net_hint.set_wrap(True); self.net_hint.set_visible(False)
         nbox.append(self.net_hint)
@@ -289,9 +394,19 @@ class TikuConsole(Gtk.Application):
         pb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         self.ping_t = Gtk.Entry(text=BOARD_IP); self.ping_t.set_hexpand(True)
         self.ping_t.connect("activate", self.on_ping); pb.append(self.ping_t)
+        pb.append(Gtk.Label(label="×"))
+        self.ping_n_spin = Gtk.SpinButton.new_with_range(1, 100, 1)
+        self.ping_n_spin.set_value(5)
+        self.ping_n_spin.set_tooltip_text("number of ping packets to send")
+        pb.append(self.ping_n_spin)
         self.ping_btn = Gtk.Button(label="Ping")
         self.ping_btn.connect("clicked", self.on_ping); pb.append(self.ping_btn)
         nbox.append(pb)
+        self.ping_anim = Gtk.DrawingArea(); self.ping_anim.set_content_height(66)
+        self.ping_anim.set_draw_func(self._draw_ping_anim)
+        self.ping_anim.set_tooltip_text("this PC ──packets──> board (animated "
+                                        "while pinging)")
+        nbox.append(self.ping_anim)
         self.ping_stats = Gtk.Label(label="idle -- enter an address and click Ping")
         self.ping_stats.set_xalign(0); self.ping_stats.set_selectable(True)
         self.ping_stats.set_wrap(True); nbox.append(self.ping_stats)
@@ -307,11 +422,11 @@ class TikuConsole(Gtk.Application):
         self.ping_ok = self.ping_buf.create_tag("ok", foreground=GREEN)
         self.ping_bad = self.ping_buf.create_tag("bad", foreground="#ff6b6b")
         psw.set_child(self.ping_view); nbox.append(psw)
-        self._update_leds()                        # initial state (both off)
         return nbox
 
     def _update_leds(self):
-        """Refresh the two traffic-light dots: board SLIP + host Internet/NAT."""
+        """Refresh the main-window status lights: USB link, board SLIP, NAT."""
+        self.usb_led.set_markup(self._led(self.ser is not None, "USB"))
         self.slip_led.set_markup(self._led(self.slip_on, "SLIP"))
         self.nat_led.set_markup(self._led(self.nat_on, "Internet"))
 
@@ -437,7 +552,7 @@ class TikuConsole(Gtk.Application):
                                              self.ser.fileno(),
                                              GLib.IOCondition.IN, self._on_serial)
         self.connect_btn.set_label("Disconnect")
-        self.cin.set_sensitive(True)
+        self._update_leds()                        # USB light -> green
         self._set_status("connected to %s @ %s baud" %
                          (self.port_path, self.baud.get_text()))
         GLib.idle_add(self._focus_console)         # grab focus after click settles
@@ -487,7 +602,7 @@ class TikuConsole(Gtk.Application):
             GLib.source_remove(self.ser_src); self.ser_src = 0
         self._net_down()
         self.ping_active = False                    # cancel any in-flight ping
-        self.slip_on = False; self._update_leds()   # both indicators off
+        self.slip_on = False
         if self.ser is not None:
             try:
                 self.ser.close()
@@ -496,10 +611,10 @@ class TikuConsole(Gtk.Application):
             self.ser = None
         self.net = False
         self.connect_btn.set_label("Connect")
-        self.cin.set_sensitive(False)
         self.net_sw.set_sensitive(True)
         self.slip_btn.set_sensitive(False)
         self.nat.set_sensitive(False)
+        self._update_leds()                        # USB/SLIP lights -> off
         self._set_status("disconnected")
 
     def _on_serial(self, fd, cond, *a):
@@ -508,11 +623,16 @@ class TikuConsole(Gtk.Application):
         except Exception:
             return GLib.SOURCE_REMOVE
         # Always demux SLIP: a frame is delimited by SLIP_END (0xC0), which the
-        # board's ASCII console output never contains, so plain text falls
-        # straight through to the view.  Decoded IP packets go to _on_ip_packet
-        # -- this is what lets the rootless board-ping catch replies with no TUN.
+        # board's ASCII console output never contains, so console text falls
+        # straight through.  Decoded IP packets go to _on_ip_packet (what lets
+        # the rootless board-ping catch replies with no TUN).  Console bytes are
+        # batched into runs so append() sees whole strings, not one char at a
+        # time -- faster, and lets the SLIP-status detector match.
+        text = bytearray()
         for b in data:
             if b == SLIP_END:
+                if text:
+                    self.append(text.decode("latin-1")); text = bytearray()
                 if self.in_frame:
                     if self.frame:
                         self._on_ip_packet(slip_unescape(self.frame))
@@ -522,7 +642,9 @@ class TikuConsole(Gtk.Application):
             elif self.in_frame:
                 self.frame.append(b)
             else:
-                self.append(bytes([b]).decode("latin-1"))
+                text.append(b)
+        if text:
+            self.append(text.decode("latin-1"))
         return GLib.SOURCE_CONTINUE
 
     def _on_ip_packet(self, pkt):
@@ -547,16 +669,13 @@ class TikuConsole(Gtk.Application):
         return GLib.SOURCE_CONTINUE
 
     # ---- console / actions -----------------------------------------------
-    def on_send(self, entry):
-        self.send_line(entry.get_text()); entry.set_text("")
-
     def send_line(self, line):
         if self.ser is not None:
             self.ser.write((line + "\r").encode())
 
     def _route_key(self, ctrl, keyval, code, state):
         """Window-level gate: forward keys to the board when connected, but let
-        real text fields (baud / command line / ping target) keep their keys."""
+        real text fields (baud / ping target / count) keep their keys."""
         if self.ser is None:
             return False
         if isinstance(self.win.get_focus(), Gtk.Editable):
@@ -617,7 +736,21 @@ class TikuConsole(Gtk.Application):
                 " background-color:#0b0b0b; color:#cccccc;"
                 " font-family:\"DejaVu Sans Mono\",\"Liberation Mono\","
                 "\"Noto Sans Mono\",monospace; font-size:11pt; }"
-                "textview.console { padding:4px; }")
+                "textview.console { padding:4px; }"
+                ".splash { background-image:"
+                " linear-gradient(165deg,#ffffff 0%,#f4eee1 100%); }"
+                ".splash-body { padding:6px 40px 20px 40px; }"
+                ".splash-accent { background-image:"
+                " linear-gradient(90deg,#1f6fc4 0%,#2e9e54 52%,#f0a91e 100%); }"
+                ".splash-title { font-size:28pt; font-weight:bold; color:#14457f; }"
+                ".splash-sub { font-size:12pt; color:#5b6b79; }"
+                ".splash-author { font-size:13pt; font-weight:bold; color:#1565c0; }"
+                ".splash-lic { font-size:9pt; color:#8a8a8a; }"
+                ".splash-load { font-size:11pt; font-weight:bold; color:#2e7d32; }"
+                ".splash progressbar > trough,"
+                " .splash progressbar > trough > progress { min-height:9px; }"
+                ".splash progressbar > trough > progress { background-image:"
+                " linear-gradient(90deg,#1f6fc4,#2e9e54,#f0a91e); }")
         try:
             css.load_from_string(data)
         except Exception:
@@ -638,10 +771,13 @@ class TikuConsole(Gtk.Application):
     _CSI = re.compile(r"\x1b\[([0-9;]*)([A-Za-z])")
 
     def append(self, text):
-        if "SLIP off --" in text:                  # the board's own status lines
-            self._set_slip_led(False)
-        elif "SLIP on." in text:
-            self._set_slip_led(True)
+        # Drive the SLIP light off the board's own status lines.  A small
+        # rolling tail keeps it working even if the line spans two reads.
+        self.slip_scan = (self.slip_scan + text)[-96:]
+        if "SLIP off --" in self.slip_scan:
+            self._set_slip_led(False); self.slip_scan = ""
+        elif "SLIP on." in self.slip_scan:
+            self._set_slip_led(True); self.slip_scan = ""
         s = self.ansi_pending + text
         self.ansi_pending = ""
         # Stash a trailing, incomplete escape for the next chunk.
@@ -730,10 +866,13 @@ class TikuConsole(Gtk.Application):
         self.ping_seq_t = {}
         self.ping_target = target
         self.ping_ident = (self.ping_ident + 1) & 0xffff
-        self.ping_i = 0; self.ping_n = 5
+        self.ping_i = 0; self.ping_n = int(self.ping_n_spin.get_value())
         self.ping_buf.set_text(""); self.spark.queue_draw()
         self.ping_stats.set_text("pinging %s over SLIP ..." % target)
         self.ping_btn.set_sensitive(False)
+        self.ping_anim_phase = 0.0
+        if not self.ping_anim_src:                  # drive the packet animation
+            self.ping_anim_src = GLib.timeout_add(50, self._ping_anim_tick)
         self.send_line("slip on")                  # ensure board SLIP (idempotent)
         GLib.timeout_add(350, self._slip_ping_tick)  # settle, then one probe/tick
 
@@ -770,6 +909,7 @@ class TikuConsole(Gtk.Application):
             return
         rtt = (time.monotonic() - t0) * 1000.0
         self.ping_rtts.append(rtt); self.ping_recv += 1
+        self.ping_pulse = 8                         # flash the board glyph
         bar = "█" * max(1, int(round(20 * rtt / (max(self.ping_rtts) or 1))))
         self._ping_row("packet %-3d %7.1f ms  %s" % (seq, rtt, bar), self.ping_ok)
         self._ping_stats(); self.spark.queue_draw()
@@ -817,6 +957,60 @@ class TikuConsole(Gtk.Application):
                 "(is SLIP on / NAT needed?)" % sent)
         else:
             self.ping_stats.set_text("idle -- enter an address and click Ping")
+
+    def _ping_anim_tick(self):
+        self.ping_anim_phase = (self.ping_anim_phase + 0.045) % 1.0
+        if self.ping_pulse > 0:
+            self.ping_pulse -= 1
+        self.ping_anim.queue_draw()
+        if not self.ping_active and self.ping_pulse <= 0:
+            self.ping_anim_src = 0                  # idle -> stop animating
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    def _draw_ping_anim(self, area, cr, w, h, *a):
+        """Illustrate this PC -> board over the wire: a monitor on the left, the
+        controller chip on the right, IPs underneath, and amber packets sliding
+        across while a ping runs (the chip glows green on each reply)."""
+        cr.set_source_rgb(0.043, 0.043, 0.043); cr.paint()
+        midy = h * 0.46
+        pcx, bdx = 28.0, w - 28.0
+        cr.set_source_rgb(0.33, 0.33, 0.33); cr.set_line_width(1.5)   # wire
+        cr.move_to(pcx + 16, midy); cr.line_to(bdx - 14, midy); cr.stroke()
+        # this PC: a little monitor + stand
+        cr.set_source_rgb(0.16, 0.50, 0.82); cr.set_line_width(1.8)
+        cr.rectangle(pcx - 14, midy - 10, 27, 16); cr.stroke()
+        cr.move_to(pcx - 3, midy + 6); cr.line_to(pcx - 6, midy + 11)
+        cr.move_to(pcx + 2, midy + 6); cr.line_to(pcx + 5, midy + 11)
+        cr.move_to(pcx - 8, midy + 11); cr.line_to(pcx + 7, midy + 11); cr.stroke()
+        # board / controller: a chip with pins (glows on a reply)
+        if self.ping_pulse > 0:
+            cr.set_source_rgba(0.30, 0.80, 0.42, 0.45)
+            cr.arc(bdx, midy, 18, 0, 6.2832); cr.fill()
+        cr.set_source_rgb(0.20, 0.66, 0.36); cr.set_line_width(1.8)
+        cr.rectangle(bdx - 9, midy - 9, 18, 18); cr.stroke()
+        for i in range(3):
+            yy = midy - 5 + i * 5
+            cr.move_to(bdx - 9, yy); cr.line_to(bdx - 13, yy)
+            cr.move_to(bdx + 9, yy); cr.line_to(bdx + 13, yy)
+        cr.stroke()
+        # amber packets sliding PC -> board while a ping is running
+        if self.ping_active:
+            x0, x1 = pcx + 18, bdx - 16
+            cr.set_source_rgb(0.96, 0.70, 0.14)
+            for k in range(4):
+                p = (self.ping_anim_phase + k / 4.0) % 1.0
+                cr.arc(x0 + (x1 - x0) * p, midy, 2.6, 0, 6.2832); cr.fill()
+        # labels: roles above, IPs below
+        cr.select_font_face("monospace")
+
+        def ctext(x, y, s, size, g):
+            cr.set_source_rgb(g, g, g); cr.set_font_size(size)
+            e = cr.text_extents(s); cr.move_to(x - e.width / 2.0, y); cr.show_text(s)
+        ctext(pcx, midy - 15, "this PC", 8, 0.5)
+        ctext(bdx, midy - 15, "board", 8, 0.5)
+        ctext(pcx, h - 3, HOST_IP, 9, 0.66)
+        ctext(bdx, h - 3, self.ping_target, 9, 0.66)
 
     def _draw_spark(self, area, cr, w, h, *a):
         cr.set_source_rgb(0.04, 0.04, 0.04); cr.paint()
