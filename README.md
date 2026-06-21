@@ -1,7 +1,7 @@
 # TikuConsole
 
 TikuConsole is a serial console and network bridge for
-[TikuOS](http://tiku-os.org)-powered computers. Over the board's serial link it
+[TikuOS](http://tiku-os.org) computers. Over the board's serial link it
 gives you an interactive shell, and bridges that same wire onto IP — connecting
 the board to the internet and to the host's network.
 
@@ -30,7 +30,7 @@ sudo python3 tikuconsole.py     # also enables the host TUN/NAT bridge
 3. For networking, flip **Networking**: toggle SLIP on the board, **Ping** it,
    and (as root) enable **NAT** to give the board internet.
 
-### Headless / env vars
+### Options
 
 ```bash
 TIKUCONSOLE_SCAN=1     python3 tikuconsole.py   # list ports + guesses, then exit
@@ -38,11 +38,8 @@ TIKUCONSOLE_SMOKE_MS=1200 python3 tikuconsole.py # build the window, quit (CI sm
 TIKUCONSOLE_NO_SPLASH=1 python3 tikuconsole.py  # skip the splash screen
 ```
 
-## Addresses
-
-Point-to-point SLIP link: device **172.16.7.2**, host **172.16.7.1**. The
-device address is set on the firmware side (`make … IP=10.0.0.5`); keep both
-ends in sync if you change it.
+The board's IP defaults to **172.16.7.2** (host **172.16.7.1**); set it on the
+firmware side with `make … IP=10.0.0.5` and keep both ends in sync.
 
 ## License
 
