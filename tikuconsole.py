@@ -24,7 +24,9 @@ SPDX-License-Identifier: Apache-2.0
 import os
 import re
 import sys
+import time
 import struct
+import socket
 import fcntl
 
 sys.dont_write_bytecode = True  # avoid root-owned __pycache__ when run via sudo
@@ -36,6 +38,48 @@ TUNSETIFF = 0x400454CA
 IFF_TUN, IFF_NO_PI = 0x0001, 0x1000
 
 BOARD_IP, HOST_IP, SUBNET = "172.16.7.2", "172.16.7.1", "172.16.7.0/24"
+
+
+# --- ICMP-over-SLIP ping: build/parse packets in userspace.  No TUN, no root,
+#     no system 'ping' -- the board's own net stack answers echo requests. ------
+def _inet_checksum(data):
+    """16-bit one's-complement Internet checksum (RFC 1071)."""
+    if len(data) % 2:
+        data += b"\x00"
+    s = sum(struct.unpack("!%dH" % (len(data) // 2), data))
+    s = (s >> 16) + (s & 0xffff)
+    s += s >> 16
+    return (~s) & 0xffff
+
+
+def _build_icmp_echo(ident, seq, payload=b""):
+    """ICMP echo request (type 8, code 0) with checksum."""
+    head = struct.pack("!BBHHH", 8, 0, 0, ident & 0xffff, seq & 0xffff)
+    cks = _inet_checksum(head + payload)
+    return struct.pack("!BBHHH", 8, 0, cks, ident & 0xffff,
+                       seq & 0xffff) + payload
+
+
+def _build_ip(src, dst, proto, payload, ident=0):
+    """Minimal 20-byte IPv4 header (no options) + payload; src/dst are 4-byte
+    network-order addresses from socket.inet_aton()."""
+    fields = (0x45, 0, 20 + len(payload), ident & 0xffff, 0, 64, proto)
+    base = struct.pack("!BBHHHBBH4s4s", *fields, 0, src, dst)
+    return struct.pack("!BBHHHBBH4s4s", *fields,
+                       _inet_checksum(base), src, dst) + payload
+
+
+def _parse_icmp_echo_reply(pkt, ident):
+    """seq if pkt is an ICMP echo reply (type 0) for our ident, else None.
+    IHL-aware; the board already validated the request checksum."""
+    if len(pkt) < 28 or (pkt[0] >> 4) != 4 or pkt[9] != 1:
+        return None                                # short / not IPv4 / not ICMP
+    icmp = pkt[(pkt[0] & 0x0f) * 4:]
+    if len(icmp) < 8 or icmp[0] != 0:              # type 0 = echo reply
+        return None
+    rid, rseq = struct.unpack("!HH", icmp[4:8])
+    return rseq if rid == (ident & 0xffff) else None
+
 
 # Platform fingerprints: (vid, pid|None, label, default baud).  First match wins.
 _USB_IDS = [
@@ -88,7 +132,7 @@ if os.environ.get("TIKUCONSOLE_SCAN"):
 
 import gi  # noqa: E402
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk, Gdk, GLib, Gio, Pango  # noqa: E402
+from gi.repository import Gtk, Gdk, GLib, Pango  # noqa: E402
 
 GREEN = "#8ae234"
 
@@ -109,7 +153,10 @@ class TikuConsole(Gtk.Application):
         # counters
         self.fr_in = self.fr_out = self.by_in = self.by_out = 0
         # ping
-        self.ping_proc = None
+        # in-app ICMP-over-SLIP ping (rootless: no TUN / no system 'ping')
+        self.ping_active = False
+        self.ping_ident = 0x4242
+        self.ping_seq_t = {}                  # seq -> send time (monotonic)
         self.ping_rtts = []
         self.ping_sent = self.ping_recv = 0
 
@@ -210,6 +257,9 @@ class TikuConsole(Gtk.Application):
         nbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         nbox.set_size_request(340, -1)
         nbox.append(self._h("Networking (SLIP/IP over the wire)"))
+        self.net_hint = Gtk.Label(); self.net_hint.set_xalign(0)
+        self.net_hint.set_wrap(True); self.net_hint.set_visible(False)
+        nbox.append(self.net_hint)
         self.slip_btn = Gtk.Button(label="Toggle SLIP on board")
         self.slip_btn.set_sensitive(False)
         self.slip_btn.connect("clicked", lambda b: self.send_line("slip"))
@@ -292,44 +342,57 @@ class TikuConsole(Gtk.Application):
             self.platform_lbl.set_text("--")
 
     def on_net_toggle(self, _sw, active):
-        if getattr(self, "_net_guard", False):     # ignore our own revert below
-            return False
-        self.netpanel.set_visible(active)
-        if self.ser is None:                       # not connected: just remember
+        # The switch only reflects the user's choice; we never flip it back (a
+        # reentrant set_active() from inside this state-set handler leaves GTK's
+        # active/state inconsistent and the switch sticks).  The real work lives
+        # in _apply_net, shared with on_connect.
+        if self.ser is None:                       # not connected: remember choice
+            self.netpanel.set_visible(active)
             if active and os.geteuid() != 0:
-                self._set_status("Networking mode -- needs sudo to connect "
-                                 "(or turn it off for a plain console)")
+                self._set_status("Networking mode -- host TUN/NAT needs sudo "
+                                 "(SLIP + board ping work without it)")
             return False
-        # --- live toggle on an already-open console ---
-        if active:
-            if os.geteuid() != 0:
-                self._set_status("Networking needs root -- relaunch with sudo "
-                                 "to add it to a live console.", err=True)
-                self._revert_net_sw(); self.netpanel.set_visible(False)
-                return False
-            if not self._net_up():
-                self._revert_net_sw()
-                return False
-            self.net = True
-            self.slip_btn.set_sensitive(True)
-            self.nat.set_sensitive(True)
-            self.append("[tikuconsole] networking on; enabling SLIP on the "
-                        "board...\n")
-            GLib.timeout_add(400, self._auto_slip)
-        else:
-            self.send_line("slip off")             # hand the wire back to console
+        self._apply_net(active)
+        return False
+
+    def _apply_net(self, active):
+        """Show/hide the networking pane on a live console and bring the host
+        TUN up (root) or not.  SLIP and the in-app board ping work over the bare
+        serial without root; only the host TUN/NAT bridge needs it."""
+        if not active:
+            self.netpanel.set_visible(False)
+            self.net_hint.set_visible(False)
+            self.ping_active = False               # cancel any in-flight ping
+            self.send_line("slip off")             # console-only (idempotent)
             self._net_down()
             self.net = False
             self.slip_btn.set_sensitive(False)
             self.nat.set_sensitive(False)
             self.append("[tikuconsole] networking off -- console-only.\n")
-        return False
-
-    def _revert_net_sw(self):
-        """Flip the switch back without re-entering on_net_toggle."""
-        self._net_guard = True
-        self.net_sw.set_active(False)
-        self._net_guard = False
+            return
+        self.netpanel.set_visible(True)            # show the pane
+        self.slip_btn.set_sensitive(True)          # SLIP toggle needs no host root
+        if os.geteuid() == 0 and self._net_up():
+            self.net = True
+            self.net_hint.set_visible(False)
+            self.nat.set_sensitive(True)
+            self.append("[tikuconsole] networking on; enabling SLIP on the "
+                        "board...\n")
+            GLib.timeout_add(400, self._auto_slip)
+            return
+        # no host TUN (not root, or setup failed) -- SLIP + ping still work
+        self.net = False
+        self.nat.set_sensitive(False)
+        if os.geteuid() != 0:
+            hint = ("⚠ host TUN/NAT bridge needs sudo. SLIP + board ping work "
+                    "without it; relaunch with sudo for the full bridge.")
+            self._set_status("Networking pane shown -- SLIP + board ping work "
+                             "now; host TUN/NAT needs sudo.")
+        else:
+            hint = "⚠ tun0 setup failed -- see status above"
+        self.net_hint.set_markup(
+            "<span foreground='#ff6b6b' weight='bold'>%s</span>" % hint)
+        self.net_hint.set_visible(True)
 
     # ---- connect / serial / tun ------------------------------------------
     def on_connect(self, _btn):
@@ -338,11 +401,6 @@ class TikuConsole(Gtk.Application):
         if not self.port_path:
             self._set_status("no serial port -- plug in a board and press ⟳",
                              err=True); return
-        self.net = self.net_sw.get_active()
-        if self.net and os.geteuid() != 0:
-            self._set_status("Networking needs root (creates a TUN). Re-launch "
-                             "with sudo, or switch Networking off.", err=True)
-            return
         try:
             import serial
             self.ser = serial.Serial(self.port_path, int(self.baud.get_text()),
@@ -351,23 +409,17 @@ class TikuConsole(Gtk.Application):
             self._set_status("error opening %s: %s" % (self.port_path, e),
                              err=True)
             self.ser = None; return
-        if self.net and not self._net_up():
-            self._teardown(); return
         self.ser_src = GLib.unix_fd_add_full(GLib.PRIORITY_DEFAULT,
                                              self.ser.fileno(),
                                              GLib.IOCondition.IN, self._on_serial)
         self.connect_btn.set_label("Disconnect")
         self.cin.set_sensitive(True)
-        self.slip_btn.set_sensitive(self.net)      # networking stays toggleable
-        self.nat.set_sensitive(self.net)
         self._set_status("connected to %s @ %s baud" %
                          (self.port_path, self.baud.get_text()))
         GLib.idle_add(self._focus_console)         # grab focus after click settles
-        if self.net:
-            self.append("[tikuconsole] connected; enabling SLIP on the board...\n")
-            GLib.timeout_add(400, self._auto_slip)
-        else:
-            self.append("[tikuconsole] connected (console mode) -- type away.\n")
+        self.append("[tikuconsole] connected (console mode) -- type away.\n")
+        if self.net_sw.get_active():               # networking pre-selected
+            self._apply_net(True)
 
     def _net_up(self):
         try:
@@ -410,6 +462,7 @@ class TikuConsole(Gtk.Application):
         if self.ser_src:
             GLib.source_remove(self.ser_src); self.ser_src = 0
         self._net_down()
+        self.ping_active = False                    # cancel any in-flight ping
         if self.ser is not None:
             try:
                 self.ser.close()
@@ -429,16 +482,15 @@ class TikuConsole(Gtk.Application):
             data = self.ser.read(4096)
         except Exception:
             return GLib.SOURCE_REMOVE
-        if self.tun < 0:                           # plain console: no SLIP demux
-            self.append(data.decode("latin-1"))
-            return GLib.SOURCE_CONTINUE
+        # Always demux SLIP: a frame is delimited by SLIP_END (0xC0), which the
+        # board's ASCII console output never contains, so plain text falls
+        # straight through to the view.  Decoded IP packets go to _on_ip_packet
+        # -- this is what lets the rootless board-ping catch replies with no TUN.
         for b in data:
             if b == SLIP_END:
                 if self.in_frame:
                     if self.frame:
-                        pkt = slip_unescape(self.frame)
-                        os.write(self.tun, pkt)
-                        self.fr_in += 1; self.by_in += len(pkt)
+                        self._on_ip_packet(slip_unescape(self.frame))
                     self.frame = bytearray(); self.in_frame = False
                 else:
                     self.in_frame = True; self.frame = bytearray()
@@ -447,6 +499,14 @@ class TikuConsole(Gtk.Application):
             else:
                 self.append(bytes([b]).decode("latin-1"))
         return GLib.SOURCE_CONTINUE
+
+    def _on_ip_packet(self, pkt):
+        """A full SLIP-decoded IP packet from the board."""
+        self.fr_in += 1; self.by_in += len(pkt)
+        if self.tun >= 0:
+            os.write(self.tun, pkt)                 # hand to the host kernel
+        if self.ping_active:
+            self._ping_rx(pkt)                      # in-app rootless pinger
 
     def _on_tun(self, fd, cond, *a):
         try:
@@ -624,60 +684,89 @@ class TikuConsole(Gtk.Application):
 
     # ---- ping -------------------------------------------------------------
     def on_ping(self, _w):
-        if self.ping_proc is not None:             # already running -- ignore
+        if self.ping_active:                        # one run at a time
             return
-        if self.ser is None or not self.net:
-            self.ping_stats.set_text("connect in Networking mode first")
-            return
+        if self.ser is None:
+            self.ping_stats.set_text("connect first"); return
         target = self.ping_t.get_text().strip()
-        if not target:
-            return
-        self.ping_rtts = []; self.ping_sent = 0; self.ping_recv = 0
-        self.ping_buf.set_text(""); self.spark.queue_draw()
-        self.ping_stats.set_text("pinging %s ..." % target)
-        try:
-            self.ping_proc = Gio.Subprocess.new(
-                ["ping", "-O", "-c", "5", "-i", "0.3", "-W", "1", target],
-                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_MERGE)
-        except Exception as e:
-            self.ping_stats.set_text("ping error: %s" % e)
-            self.ping_proc = None; return
-        self.ping_proc.communicate_utf8_async(None, None, self._ping_done)
+        if target:
+            self._slip_ping(target)
 
-    def _ping_done(self, proc, res):
-        self.ping_proc = None
+    def _slip_ping(self, target):
+        """Rootless ping: craft ICMP echo requests, SLIP them to the board, and
+        match the replies in _on_ip_packet.  No TUN, no system 'ping', no root
+        -- the board's own ICMP stack answers echo requests."""
+        self.ping_active = True
+        self.ping_rtts = []; self.ping_sent = 0; self.ping_recv = 0
+        self.ping_seq_t = {}
+        self.ping_target = target
+        self.ping_ident = (self.ping_ident + 1) & 0xffff
+        self.ping_i = 0; self.ping_n = 5
+        self.ping_buf.set_text(""); self.spark.queue_draw()
+        self.ping_stats.set_text("pinging %s over SLIP ..." % target)
+        self.ping_btn.set_sensitive(False)
+        self.send_line("slip on")                  # ensure board SLIP (idempotent)
+        GLib.timeout_add(350, self._slip_ping_tick)  # settle, then one probe/tick
+
+    def _slip_ping_tick(self):
+        if not self.ping_active:                    # cancelled (disconnect / off)
+            return GLib.SOURCE_REMOVE
+        if self.ping_i >= self.ping_n:             # all sent -> wait, then finish
+            GLib.timeout_add(1000, self._slip_ping_finish)
+            return GLib.SOURCE_REMOVE
+        seq = self.ping_i; self.ping_i += 1
         try:
-            _, out, _ = proc.communicate_utf8_finish(res)
-        except Exception as e:
-            self.ping_stats.set_text("ping error: %s" % e); return
-        out = out or ""
-        rows = []                                  # (seq, rtt|None)
-        for line in out.splitlines():
-            m = re.search(r"icmp_seq=(\d+).*time=([\d.]+)", line)
-            if m:
-                rows.append((int(m.group(1)), float(m.group(2))))
-            elif "no answer yet" in line:
-                m2 = re.search(r"icmp_seq=(\d+)", line)
-                rows.append((int(m2.group(1)) if m2 else len(rows) + 1, None))
-            else:
-                mt = re.search(r"(\d+) packets transmitted", line)
-                if mt:
-                    self.ping_sent = max(self.ping_sent, int(mt.group(1)))
-        self.ping_rtts = [rt for _, rt in rows if rt is not None]
-        self.ping_sent = max(self.ping_sent, len(rows))
-        self.ping_recv = len(self.ping_rtts)
-        if not rows:                               # ping errored -> show why
-            self._ping_row(out.strip()[-300:] or "(no output)", self.ping_bad)
-        mx = max(self.ping_rtts) if self.ping_rtts else 1.0
-        for seq, rt in rows:                       # one row per packet, with a bar
-            if rt is None:
-                self._ping_row("packet %-3d  no reply (timed out)" % seq,
-                               self.ping_bad)
-            else:
-                bar = "█" * max(1, int(round(20 * rt / mx)))
-                self._ping_row("packet %-3d %7.1f ms  %s" % (seq, rt, bar),
-                               self.ping_ok)
+            dst = socket.inet_aton(self.ping_target)
+        except OSError:
+            self.ping_stats.set_text("bad address: %s" % self.ping_target)
+            self.ping_active = False; self.ping_btn.set_sensitive(True)
+            return GLib.SOURCE_REMOVE
+        pkt = _build_ip(socket.inet_aton(HOST_IP), dst, 1,
+                        _build_icmp_echo(self.ping_ident, seq, b"tikuconsole"))
+        self.ping_seq_t[seq] = time.monotonic()
+        try:
+            self.ser.write(slip_encode(pkt))
+        except Exception:
+            self.ping_active = False; self.ping_btn.set_sensitive(True)
+            return GLib.SOURCE_REMOVE
+        self.ping_sent += 1; self.fr_out += 1; self.by_out += len(pkt)
+        return GLib.SOURCE_CONTINUE                 # next probe next tick
+
+    def _ping_rx(self, pkt):
+        seq = _parse_icmp_echo_reply(pkt, self.ping_ident)
+        if seq is None:
+            return
+        t0 = self.ping_seq_t.pop(seq, None)
+        if t0 is None:                             # dup or already-finished
+            return
+        rtt = (time.monotonic() - t0) * 1000.0
+        self.ping_rtts.append(rtt); self.ping_recv += 1
+        bar = "█" * max(1, int(round(20 * rtt / (max(self.ping_rtts) or 1))))
+        self._ping_row("packet %-3d %7.1f ms  %s" % (seq, rtt, bar), self.ping_ok)
         self._ping_stats(); self.spark.queue_draw()
+
+    def _slip_ping_finish(self):
+        if not self.ping_active:
+            return GLib.SOURCE_REMOVE
+        self.ping_active = False
+        self.ping_btn.set_sensitive(True)
+        for seq in sorted(self.ping_seq_t):        # never answered
+            self._ping_row("packet %-3d  no reply (timed out)" % seq,
+                           self.ping_bad)
+        self.ping_seq_t = {}
+        # --- statistics block (ping(8)-style), appended to the output ---
+        r = self.ping_rtts
+        sent, recv = self.ping_sent, self.ping_recv
+        loss = int(round(100 * (sent - recv) / sent)) if sent else 0
+        tag = self.ping_ok if recv else self.ping_bad
+        self._ping_row("--- %s ping statistics ---" % self.ping_target, tag)
+        self._ping_row("%d packets sent, %d received, %d%% packet loss"
+                       % (sent, recv, loss), tag)
+        if r:
+            self._ping_row("rtt  min %.1f / avg %.1f / max %.1f ms"
+                           % (min(r), sum(r) / len(r), max(r)), tag)
+        self._ping_stats(); self.spark.queue_draw()
+        return GLib.SOURCE_REMOVE
 
     def _ping_row(self, text, tag):
         self.ping_buf.insert_with_tags(self.ping_buf.get_end_iter(), text + "\n",
