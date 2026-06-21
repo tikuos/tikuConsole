@@ -1,33 +1,11 @@
 # TikuConsole
 
-A branded GTK4 desktop **serial console for [TikuOS](http://tiku-os.org)
-devices** — a friendlier `picocom`/`minicom`. It auto-detects the serial port,
-the board (MSP430 / RP2350 / Apollo) and its baud, and drops you into a colour
-console you can type straight into.
-
-Flip on **Networking** and it brings up SLIP/IP over the very same wire: a TUN
-interface (so the Linux kernel's own `ping`/`curl` ride it), a **rootless**
-ICMP-over-SLIP board pinger, and board → internet NAT.
+TikuConsole is a serial console and network bridge for
+[TikuOS](http://tiku-os.org)-powered computers. Over the board's serial link it
+gives you an interactive shell, and bridges that same wire onto IP — connecting
+the board to the internet and to the host's network.
 
 ![TikuConsole](tikuConsole.png)
-
-## Features
-
-- **Auto-detect** — port dropdown with platform + baud guessed from USB VID/PID
-  (Apollo J-Link, RP2350 USB-CDC, MSP430 eZ-FET/FT232…).
-- **Colour console** — ANSI/SGR rendering, fixed-width font, type from anywhere
-  in the window; greys out when disconnected.
-- **Networking (optional)** over the one shared UART:
-  - **SLIP** toggle on the board.
-  - **Ping** the board — built in userspace (ICMP over SLIP), **no root, no
-    TUN, no system `ping`**; live packet animation + RTT chart + stats.
-  - **Internet (NAT)** — route the board to the internet via the host's WAN.
-  - **TUN bridge** so the host kernel treats the board as a network peer.
-- **Status lights** — `● USB` (link) · `● SLIP` (board SLIP on) · `● Internet`
-  (NAT on).
-
-The plain console, the SLIP toggle and the board ping all work **without root**.
-Only the host **TUN/NAT bridge** needs `sudo`.
 
 ## Requirements
 
@@ -65,22 +43,6 @@ TIKUCONSOLE_NO_SPLASH=1 python3 tikuconsole.py  # skip the splash screen
 Point-to-point SLIP link: device **172.16.7.2**, host **172.16.7.1**. The
 device address is set on the firmware side (`make … IP=10.0.0.5`); keep both
 ends in sync if you change it.
-
-## Layout
-
-`tikuconsole.py` is a thin launcher; the implementation lives in the **`tcon/`**
-package, one module per subsystem:
-
-| module | role |
-|---|---|
-| `app` | the `Gtk.Application`: state + window assembly + mixin composition |
-| `console` | ANSI rendering, keyboard routing, console CSS |
-| `connection` | serial link, SLIP/TUN bridge, connect, port picker |
-| `ping` | rootless ICMP-over-SLIP pinger, RTT chart, animation |
-| `nat` · `leds` · `splash` · `ui` | NAT, status lights, splash, side-pane |
-| `packets` · `ports` | pure (GTK-free) ICMP/IP build-parse + port detection |
-
-`slmux.py` is the command-line twin and the shared SLIP framing.
 
 ## License
 
