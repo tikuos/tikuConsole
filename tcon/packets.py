@@ -39,6 +39,17 @@ def build_ip(src, dst, proto, payload, ident=0):
                        inet_checksum(base), src, dst) + payload
 
 
+def build_udp(src_ip, src_port, dst_ip, dst_port, payload):
+    """UDP datagram (8-byte header + payload) with checksum.  src_ip/dst_ip are
+    4-byte network-order addresses (from socket.inet_aton()), needed for the
+    UDP checksum pseudo-header.  A computed zero is sent as 0xffff per RFC 768."""
+    length = 8 + len(payload)
+    pseudo = src_ip + dst_ip + struct.pack("!BBH", 0, 17, length)
+    head = struct.pack("!HHHH", src_port, dst_port, length, 0)
+    cks = inet_checksum(pseudo + head + payload) or 0xffff
+    return struct.pack("!HHHH", src_port, dst_port, length, cks) + payload
+
+
 def parse_icmp_echo_reply(pkt, ident):
     """seq if pkt is an ICMP echo reply (type 0) for our ident, else None.
     IHL-aware; the board already validated the request checksum."""

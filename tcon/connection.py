@@ -227,7 +227,9 @@ class ConnectionMixin:
         """A full SLIP-decoded IP packet from the board."""
         self.fr_in += 1; self.by_in += len(pkt)
         if self.tun >= 0:
-            os.write(self.tun, pkt)                 # hand to the host kernel
+            os.write(self.tun, pkt)                 # root path: kernel routes it
+        else:
+            self._relay_udp(pkt)                    # rootless UDP->internet relay
         if self.ping_active:
             self._ping_rx(pkt)                      # in-app rootless pinger
 
