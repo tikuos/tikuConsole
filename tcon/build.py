@@ -129,6 +129,30 @@ class BuildMixin:
         if self.bld_board_radios:
             self.bld_board_radios[idx].set_active(True)
 
+    def _bld_flags(self, board):
+        """Translate the MCU + feature checkboxes into make variables.
+
+        Features whose Makefile default can be ON -- shell (always) and BASIC
+        (defaults ON on Apollo/ambiq) -- are emitted explicitly as =0/1 so an
+        unchecked box actively turns the feature off rather than letting the
+        platform default win.  colour is explicit too for the same reason."""
+        flags = [
+            "HAS_TESTS=0", "HAS_EXAMPLES=0",
+            "TIKU_SHELL_ENABLE=%d"       % (1 if self.bld_shell.get_active()
+                                            else 0),
+            "TIKU_SHELL_BASIC_ENABLE=%d" % (1 if self.bld_basic.get_active()
+                                            else 0),
+            "TIKU_SHELL_COLOR=%d"        % (1 if self.bld_color.get_active()
+                                            else 0),
+        ]
+        if self.bld_net.get_active():
+            flags += ["TIKU_KIT_NET_ENABLE=1", "TIKU_SHELL_NET_TEST=1"]
+        if self.bld_basic.get_active() and board.family == "msp430":
+            flags.append("MEMORY_MODEL=large")      # BASIC needs it on MSP430
+        flags.append("MCU=%s" % board.mcu)
+        flags.append("UART_BAUD=%d" % board.default_baud)
+        return flags
+
     # ---- build + flash, streamed into the console -------------------------
     def on_build_flash(self, _btn):
         if self._bld_running or _TB is None:
@@ -139,21 +163,7 @@ class BuildMixin:
             self._set_status("pick an MCU first", err=True)
             return
         board = _TB.resolve_board(self.bld_boards[idx])
-
-        # Compose the build from the feature checkboxes (mirrors the Makefile).
-        flags = ["HAS_TESTS=0", "HAS_EXAMPLES=0",
-                 "TIKU_SHELL_ENABLE=%d" % (1 if self.bld_shell.get_active()
-                                           else 0)]
-        if self.bld_net.get_active():
-            flags += ["TIKU_KIT_NET_ENABLE=1", "TIKU_SHELL_NET_TEST=1"]
-        if self.bld_basic.get_active():
-            flags.append("TIKU_SHELL_BASIC_ENABLE=1")
-            if board.family == "msp430":                    # BASIC needs it here
-                flags.append("MEMORY_MODEL=large")
-        if self.bld_color.get_active():
-            flags.append("TIKU_SHELL_COLOR=1")
-        flags.append("MCU=%s" % board.mcu)
-        flags.append("UART_BAUD=%d" % board.default_baud)
+        flags = self._bld_flags(board)
 
         feats = [n for n, w in (("shell", self.bld_shell),
                                 ("net", self.bld_net),
