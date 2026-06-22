@@ -24,10 +24,11 @@ from tcon.nat import NatMixin  # noqa: E402
 from tcon.leds import LedsMixin  # noqa: E402
 from tcon.splash import SplashMixin  # noqa: E402
 from tcon.ui import UiMixin  # noqa: E402
+from tcon.build import BuildMixin  # noqa: E402
 
 
 class TikuConsole(ConsoleMixin, ConnectionMixin, PingMixin, NatMixin,
-                  LedsMixin, SplashMixin, UiMixin, Gtk.Application):
+                  LedsMixin, SplashMixin, UiMixin, BuildMixin, Gtk.Application):
     def __init__(self):
         super().__init__(application_id="org.tikuos.tikuconsole")
         self.ser = None
@@ -94,6 +95,9 @@ class TikuConsole(ConsoleMixin, ConnectionMixin, PingMixin, NatMixin,
         brow.append(leds)
         root.append(brow)
 
+        # --- firmware build/flash bar (compile + program from here) ---
+        root.append(self._build_buildbar())
+
         # --- connection bar ---
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         bar.append(Gtk.Label(label="Port"))
@@ -136,6 +140,7 @@ class TikuConsole(ConsoleMixin, ConnectionMixin, PingMixin, NatMixin,
         self.cview = Gtk.TextView(); self.cview.set_editable(False)
         self.cview.set_monospace(True); self.cview.set_wrap_mode(Gtk.WrapMode.CHAR)
         self.cbuf = self.cview.get_buffer(); sw.set_child(self.cview)
+        self.cadj = sw.get_vadjustment()           # console auto-follow target
         self.cview.add_css_class("console")
         self.cview.add_css_class("console-off")    # greyed until connected
         self._init_console_style()

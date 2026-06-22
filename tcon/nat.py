@@ -89,12 +89,20 @@ class NatMixin:
     # off-link IPv4 UDP datagram.
 
     def _relay_udp(self, pkt):
-        """Forward one off-link UDP datagram from the board to the internet."""
-        if len(pkt) < 28 or (pkt[0] >> 4) != 4 or pkt[9] != 17:
-            return                                   # not IPv4 UDP
+        """Forward one off-link UDP datagram from the board to the internet.
+
+        Rootless, so UDP only (DNS / NTP / ...).  ICMP (ping) cannot be relayed
+        without root; flag it so a silent ping timeout doesn't look like a bug."""
+        if len(pkt) < 20 or (pkt[0] >> 4) != 4:
+            return                                   # not IPv4
         dst_ip = bytes(pkt[16:20])
         if dst_ip == _HOST_BYTES:
             return                                   # for the host, not the world
+        if pkt[9] == 1:                              # ICMP -- needs root (TUN/NAT)
+            self._relay_icmp_hint(dst_ip)
+            return
+        if pkt[9] != 17 or len(pkt) < 28:
+            return                                   # only UDP rides this relay
         ihl = (pkt[0] & 0x0f) * 4
         if len(pkt) < ihl + 8:
             return
@@ -119,6 +127,17 @@ class NatMixin:
             self._relay_reply, (s, dst_ip, dst_port, src_ip, src_port))
         # Reap the socket if no reply arrives within a few seconds.
         GLib.timeout_add_seconds(6, self._relay_expire, s, watch)
+
+    def _relay_icmp_hint(self, dst_ip):
+        """Rate-limited note that ICMP (ping) can't ride the rootless relay."""
+        now = GLib.get_monotonic_time()
+        if now - getattr(self, "_icmp_hint_t", 0) < 5_000_000:   # ~1 per 5 s
+            return
+        self._icmp_hint_t = now
+        self.append("[relay] ICMP to %s needs root -- ping works only with the "
+                    "TUN/NAT bridge; relaunch tikuConsole with sudo (UDP "
+                    "services like ntp/dns work rootless).\n"
+                    % socket.inet_ntoa(dst_ip))
 
     def _relay_reply(self, _fd, _cond, data):
         """A reply arrived on a relay socket: frame it back to the board."""

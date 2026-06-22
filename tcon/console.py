@@ -116,6 +116,15 @@ class ConsoleMixin:
                                                             foreground=color)
         self.tags["bold"] = self.cbuf.create_tag("bold", weight=Pango.Weight.BOLD)
         self.tags["dim"] = self.cbuf.create_tag("dim", foreground="#7f7f7f")
+        # Auto-follow the tail.  Scrolling right after an insert races the lazy
+        # line-height validation and stalls; instead react to the scroll
+        # adjustment's own signals.  "changed" fires once the view has
+        # re-measured after new text -- the moment we can reliably pin to the
+        # bottom; "value-changed" tracks whether the user has scrolled away.
+        self._follow = True
+        if getattr(self, "cadj", None) is not None:
+            self.cadj.connect("value-changed", self._on_scroll_value)
+            self.cadj.connect("changed", self._on_scroll_changed)
         self.ansi_pending = ""
         self.cur = []                       # active ANSI tag names
 
@@ -143,6 +152,16 @@ class ConsoleMixin:
         if pos < len(s):
             self._insert(s[pos:])
 
+    def _on_scroll_value(self, adj):
+        """Track whether the view is pinned to the end (vs. scrolled up)."""
+        self._follow = (adj.get_value() + adj.get_page_size()
+                        >= adj.get_upper() - 24.0)
+
+    def _on_scroll_changed(self, adj):
+        """New content was re-measured: if we were at the end, stay there."""
+        if self._follow:
+            adj.set_value(adj.get_upper() - adj.get_page_size())
+
     def _insert(self, t):
         if not t:
             return
@@ -160,7 +179,6 @@ class ConsoleMixin:
             self.cbuf.insert_with_tags(it, t, *tags)
         else:
             self.cbuf.insert(it, t)
-        self.cview.scroll_to_mark(self.cbuf.get_insert(), 0.0, False, 0, 0)
 
     def _insert_ctl(self, t):
         """Interpret the control bytes a terminal would: the board echoes
@@ -181,7 +199,6 @@ class ConsoleMixin:
                 run += ch
         if run:
             self._raw_insert(run)
-        self.cview.scroll_to_mark(self.cbuf.get_insert(), 0.0, False, 0, 0)
 
     def _sgr(self, params):
         for c in ([int(x) for x in params.split(";") if x] or [0]):
