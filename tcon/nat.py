@@ -22,6 +22,11 @@ from slmux import slip_encode
 # the world rather than for us?" check.
 _HOST_BYTES = socket.inet_aton(HOST_IP)
 
+# The board's link MTU.  DNS replies larger than this are dropped by the board's
+# IP layer, so the gateway trims them to fit (see _dns_fit_packet) -- the board
+# only ever keeps the first A record anyway.
+_BOARD_MTU = 128
+
 
 class NatMixin:
     def on_nat(self, _sw, active):
@@ -147,7 +152,7 @@ class NatMixin:
         except OSError:
             return GLib.SOURCE_REMOVE
         udp = build_udp(dst_ip, dst_port, src_ip, src_port, reply)
-        pkt = build_ip(dst_ip, src_ip, 17, udp)
+        pkt = self._dns_fit_packet(build_ip(dst_ip, src_ip, 17, udp))
         try:
             self.ser.write(slip_encode(pkt))
             self.fr_out += 1
@@ -174,3 +179,82 @@ class NatMixin:
             except OSError:
                 pass
         return False
+
+    # ---- DNS adaptation for the constrained link -------------------------
+    #
+    # The board's MTU is 128 bytes, but a popular name (google.com) answers
+    # with six A records -- a 152-byte frame the board's IP layer drops, so the
+    # query just times out.  Nothing on the UDP path can shrink it (EDNS sizes
+    # below 512 are clamped per RFC 6891).  As the gateway onto the constrained
+    # link, rewrite an oversize DNS reply to its first A record before framing
+    # it -- exactly what a 6LoWPAN/IoT border router does, and lossless for the
+    # board, which keeps only one address anyway.
+
+    @staticmethod
+    def _dns_skip_name(b, pos):
+        """Advance past a DNS name (labels or a compression pointer)."""
+        while pos < len(b):
+            n = b[pos]
+            if (n & 0xc0) == 0xc0:                   # compression pointer (2 B)
+                return pos + 2 if pos + 2 <= len(b) else None
+            if n == 0:                               # root label ends the name
+                return pos + 1
+            pos += 1 + n
+        return None
+
+    def _dns_trim(self, dns):
+        """Rebuild a DNS response as header + question + first A record.
+
+        Returns the smaller message, or None if it is not a clean A-record
+        answer we can shrink."""
+        if len(dns) < 12:
+            return None
+        flags = (dns[2] << 8) | dns[3]
+        if not (flags & 0x8000) or (flags & 0x000f):  # response, RCODE == 0
+            return None
+        qd = (dns[4] << 8) | dns[5]
+        an = (dns[6] << 8) | dns[7]
+        if qd != 1 or an < 1:
+            return None
+        pos = self._dns_skip_name(dns, 12)
+        if pos is None or pos + 4 > len(dns):
+            return None
+        q_end = pos + 4                              # + QTYPE + QCLASS
+        question = bytes(dns[12:q_end])
+        pos = q_end
+        for _ in range(an):
+            npos = self._dns_skip_name(dns, pos)
+            if npos is None or npos + 10 > len(dns):
+                return None
+            rtype = (dns[npos] << 8) | dns[npos + 1]
+            rclass = (dns[npos + 2] << 8) | dns[npos + 3]
+            ttl = bytes(dns[npos + 4:npos + 8])
+            rdlen = (dns[npos + 8] << 8) | dns[npos + 9]
+            rdata = npos + 10
+            if rtype == 1 and rclass == 1 and rdlen == 4 and rdata + 4 <= len(dns):
+                ip = bytes(dns[rdata:rdata + 4])
+                hdr = bytes(dns[0:4]) + b"\x00\x01\x00\x01\x00\x00\x00\x00"
+                ans = (b"\xc0\x0c\x00\x01\x00\x01" + ttl   # name ptr, A, IN
+                       + b"\x00\x04" + ip)                # RDLENGTH 4 + addr
+                return hdr + question + ans
+            pos = rdata + rdlen
+        return None
+
+    def _dns_fit_packet(self, pkt):
+        """If @p pkt is a board-bound DNS reply too big for the link MTU,
+        return a trimmed copy (first A record only); else return it as-is."""
+        if len(pkt) <= _BOARD_MTU or (pkt[0] >> 4) != 4 or pkt[9] != 17:
+            return pkt
+        ihl = (pkt[0] & 0x0f) * 4
+        if len(pkt) < ihl + 8 or ((pkt[ihl] << 8) | pkt[ihl + 1]) != 53:
+            return pkt                               # not a UDP/53 (DNS) reply
+        trimmed = self._dns_trim(bytes(pkt[ihl + 8:]))
+        if trimmed is None:
+            return pkt
+        dst_port = (pkt[ihl + 2] << 8) | pkt[ihl + 3]
+        udp = build_udp(bytes(pkt[12:16]), 53, bytes(pkt[16:20]), dst_port,
+                        trimmed)
+        new = build_ip(bytes(pkt[12:16]), bytes(pkt[16:20]), 17, udp)
+        self.append("[relay] DNS reply %dB > %dB MTU -- trimmed to first A "
+                    "record (%dB)\n" % (len(pkt), _BOARD_MTU, len(new)))
+        return new

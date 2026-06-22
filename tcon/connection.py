@@ -242,6 +242,7 @@ class ConnectionMixin:
         # multicast/broadcast/IPv6 chatter so the tiny board is never flooded.
         if len(pkt) >= 20 and (pkt[0] >> 4) == 4 and \
                 pkt[16:20] == bytes((172, 16, 7, 2)):
+            pkt = self._dns_fit_packet(pkt)         # shrink oversize DNS replies
             self.ser.write(slip_encode(pkt))
             self.fr_out += 1; self.by_out += len(pkt)
         return GLib.SOURCE_CONTINUE
