@@ -1,0 +1,837 @@
+/*
+ * gui.c - TikuConsole, the GTK4 serial console for TikuOS (macOS).
+ *
+ * The C/GTK4 twin of the Linux Python tcon/ app.  A serial console that behaves
+ * like a terminal: a window-level key controller forwards keystrokes to the
+ * board, an ANSI/SGR decoder colours the output, and the same wire is always
+ * SLIP-demuxed so IP frames are separated from console text.  It wraps the
+ * shared bridge core (bridge.c) -- the same SLIP/serial/utun primitives the
+ * command-line slmux uses.
+ *
+ * This is Phase 1 of the GUI: the console + connection are complete; the
+ * networking side-panel (host utun bridge, in-app ping, NAT) and the firmware
+ * build/flash bar are layered on next.
+ *
+ * Authors: Ambuj Varshney <ambuj@tiku-os.org>
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#include <glib-unix.h>
+#include <gtk/gtk.h>
+
+#include "bridge.h"
+#include "ports.h"
+
+#define VERSION  "0.01"
+#define GREEN    "#8ae234"
+#define BOARD_IP "172.16.7.2"
+
+/* ------------------------------------------------------------------------- */
+/* App state                                                                 */
+/* ------------------------------------------------------------------------- */
+
+typedef struct {
+    GtkApplication *app;
+    GtkWindow      *win;
+
+    /* serial link */
+    int    ser_fd;
+    guint  ser_watch;
+
+    /* networking (utun bridge lands with the side-panel phase) */
+    int    utun_fd;
+
+    /* port list */
+    port_info_t ports[PORTS_MAX];
+    int         n_ports;
+    char        port_path[256];
+
+    /* SLIP demux state */
+    gboolean    in_frame;
+    GByteArray *frame;
+
+    /* status lights */
+    gboolean slip_on, nat_on;
+
+    /* byte/frame counters */
+    unsigned fr_in, fr_out, by_in, by_out;
+
+    /* widgets */
+    GtkWidget     *port_dd;
+    GtkWidget     *platform_lbl;
+    GtkWidget     *baud;
+    GtkWidget     *net_sw;
+    GtkWidget     *connect_btn;
+    GtkWidget     *status;
+    GtkWidget     *usb_led, *slip_led, *nat_led;
+    GtkTextView   *cview;
+    GtkTextBuffer *cbuf;
+    GtkAdjustment *cadj;
+    gboolean       follow;
+
+    /* console ANSI/SGR decode state */
+    GString    *ansi_pending;   /* trailing partial escape carried to next read */
+    GString    *slip_scan;      /* rolling tail driving the SLIP light */
+    gboolean    sgr_bold, sgr_dim;
+    int         sgr_fg;         /* 0 = default, else 30..37 */
+    GtkTextTag *tag_fg[8];
+    GtkTextTag *tag_bold, *tag_dim;
+} App;
+
+static void teardown(App *app);
+
+/* ------------------------------------------------------------------------- */
+/* Small helpers                                                             */
+/* ------------------------------------------------------------------------- */
+
+static void ser_write(App *app, const char *buf, size_t len)
+{
+    if (app->ser_fd >= 0) {
+        ssize_t r = write(app->ser_fd, buf, len);
+        (void)r;
+    }
+}
+
+static void send_line(App *app, const char *line)
+{
+    ser_write(app, line, strlen(line));
+    ser_write(app, "\r", 1);
+}
+
+static void set_status(App *app, const char *text, gboolean err)
+{
+    char buf[600];
+    if (err && strstr(text, "error") == NULL) {
+        snprintf(buf, sizeof(buf), "error: %s", text);
+    } else {
+        snprintf(buf, sizeof(buf), "%s", text);
+    }
+    gtk_label_set_text(GTK_LABEL(app->status), buf);
+}
+
+static void set_led(GtkWidget *lbl, gboolean on, const char *text)
+{
+    char m[128];
+    snprintf(m, sizeof(m), "<span foreground='%s'>\xe2\x97\x8f</span> %s",
+             on ? GREEN : "#ff6b6b", text);
+    gtk_label_set_markup(GTK_LABEL(lbl), m);
+}
+
+static void update_leds(App *app)
+{
+    set_led(app->usb_led, app->ser_fd >= 0, "USB");
+    set_led(app->slip_led, app->slip_on, "SLIP");
+    set_led(app->nat_led, app->nat_on, "Internet");
+}
+
+static void set_slip_led(App *app, gboolean on)
+{
+    if (on != app->slip_on) {           /* driven by the board's own messages */
+        app->slip_on = on;
+        update_leds(app);
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Console: ANSI/SGR colour, BS/CR handling, auto-follow                     */
+/* ------------------------------------------------------------------------- */
+
+/* The board drives the SLIP light through its own console status lines. */
+static void led_scan(App *app, const char *text, int len)
+{
+    g_string_append_len(app->slip_scan, text, len);
+    if (app->slip_scan->len > 96) {
+        g_string_erase(app->slip_scan, 0, (gssize)(app->slip_scan->len - 96));
+    }
+    if (strstr(app->slip_scan->str, "SLIP off --")) {
+        set_slip_led(app, FALSE);
+        g_string_set_size(app->slip_scan, 0);
+    } else if (strstr(app->slip_scan->str, "SLIP on.")) {
+        set_slip_led(app, TRUE);
+        g_string_set_size(app->slip_scan, 0);
+    }
+}
+
+/* Insert text with the currently active SGR tags applied. */
+static void console_raw_insert(App *app, const char *t, int len)
+{
+    if (len <= 0) {
+        return;
+    }
+    GtkTextIter end;
+    gtk_text_buffer_get_end_iter(app->cbuf, &end);
+    int off = gtk_text_iter_get_offset(&end);
+    gtk_text_buffer_insert(app->cbuf, &end, t, len);
+
+    GtkTextIter s2, e2;
+    gtk_text_buffer_get_iter_at_offset(app->cbuf, &s2, off);
+    gtk_text_buffer_get_end_iter(app->cbuf, &e2);
+    if (app->sgr_bold) {
+        gtk_text_buffer_apply_tag(app->cbuf, app->tag_bold, &s2, &e2);
+    }
+    if (app->sgr_dim) {
+        gtk_text_buffer_apply_tag(app->cbuf, app->tag_dim, &s2, &e2);
+    }
+    if (app->sgr_fg >= 30 && app->sgr_fg <= 37) {
+        gtk_text_buffer_apply_tag(app->cbuf, app->tag_fg[app->sgr_fg - 30],
+                                  &s2, &e2);
+    }
+}
+
+/* GtkTextView is not a terminal: the board echoes "\b \b" to erase, so treat
+ * BS as delete-previous-char, and drop lone CR (the following LF breaks). */
+static void console_insert(App *app, const char *t, int len)
+{
+    gboolean ctl = FALSE;
+    for (int i = 0; i < len; i++) {
+        if (t[i] == '\b' || t[i] == '\r') {
+            ctl = TRUE;
+            break;
+        }
+    }
+    if (!ctl) {
+        console_raw_insert(app, t, len);
+        return;
+    }
+    GString *run = g_string_new(NULL);
+    for (int i = 0; i < len; i++) {
+        char ch = t[i];
+        if (ch == '\b') {
+            if (run->len) {
+                console_raw_insert(app, run->str, (int)run->len);
+                g_string_set_size(run, 0);
+            }
+            GtkTextIter end, start;
+            gtk_text_buffer_get_end_iter(app->cbuf, &end);
+            start = end;
+            if (gtk_text_iter_backward_char(&start)) {
+                gtk_text_buffer_delete(app->cbuf, &start, &end);
+            }
+        } else if (ch == '\r') {
+            continue;
+        } else {
+            g_string_append_c(run, ch);
+        }
+    }
+    if (run->len) {
+        console_raw_insert(app, run->str, (int)run->len);
+    }
+    g_string_free(run, TRUE);
+}
+
+static void sgr_apply(App *app, const char *params)
+{
+    if (params[0] == '\0') {            /* bare ESC[m == reset */
+        app->sgr_bold = app->sgr_dim = FALSE;
+        app->sgr_fg = 0;
+        return;
+    }
+    char buf[64];
+    strncpy(buf, params, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    char *save = NULL;
+    for (char *tok = strtok_r(buf, ";", &save); tok;
+         tok = strtok_r(NULL, ";", &save)) {
+        int c = atoi(tok);
+        if (c == 0) {
+            app->sgr_bold = app->sgr_dim = FALSE;
+            app->sgr_fg = 0;
+        } else if (c == 1) {
+            app->sgr_bold = TRUE;
+        } else if (c == 2) {
+            app->sgr_dim = TRUE;
+            app->sgr_fg = 0;
+        } else if (c >= 30 && c <= 37) {
+            app->sgr_fg = c;
+        } else if (c >= 90 && c <= 97) {
+            app->sgr_fg = c - 60;
+        }
+    }
+}
+
+/* End index (exclusive) of a complete CSI escape starting at s[from], or -1. */
+static int csi_end(const char *s, int from, int n)
+{
+    if (from + 1 >= n || s[from + 1] != '[') {
+        return -1;
+    }
+    int j = from + 2;
+    while (j < n && ((s[j] >= '0' && s[j] <= '9') || s[j] == ';')) {
+        j++;
+    }
+    if (j < n && ((s[j] >= 'A' && s[j] <= 'Z') || (s[j] >= 'a' && s[j] <= 'z'))) {
+        return j + 1;
+    }
+    return -1;
+}
+
+static void console_append(App *app, const char *data, int len)
+{
+    led_scan(app, data, len);
+
+    GString *s = g_string_new_len(app->ansi_pending->str,
+                                  (gssize)app->ansi_pending->len);
+    g_string_append_len(s, data, len);
+    g_string_set_size(app->ansi_pending, 0);
+    int n = (int)s->len;
+
+    /* Stash a trailing, incomplete escape for the next chunk. */
+    int last = -1;
+    for (int k = 0; k < n; k++) {
+        if ((unsigned char)s->str[k] == 0x1b) {
+            last = k;
+        }
+    }
+    if (last >= 0 && (n - last) < 24 && csi_end(s->str, last, n) < 0) {
+        g_string_append_len(app->ansi_pending, s->str + last, n - last);
+        n = last;
+    }
+
+    int pos = 0, i = 0;
+    while (i < n) {
+        if ((unsigned char)s->str[i] == 0x1b) {
+            int e = csi_end(s->str, i, n);
+            if (e > 0) {
+                if (i > pos) {
+                    console_insert(app, s->str + pos, i - pos);
+                }
+                if (s->str[e - 1] == 'm') {     /* SGR; drop other CSI codes */
+                    char params[64];
+                    int pl = e - 1 - (i + 2);
+                    if (pl < 0) pl = 0;
+                    if (pl > 63) pl = 63;
+                    memcpy(params, s->str + i + 2, (size_t)pl);
+                    params[pl] = '\0';
+                    sgr_apply(app, params);
+                }
+                pos = e;
+                i = e;
+                continue;
+            }
+        }
+        i++;
+    }
+    if (pos < n) {
+        console_insert(app, s->str + pos, n - pos);
+    }
+    g_string_free(s, TRUE);
+}
+
+static void on_scroll_value(GtkAdjustment *adj, gpointer user)
+{
+    App *app = user;
+    app->follow = (gtk_adjustment_get_value(adj)
+                   + gtk_adjustment_get_page_size(adj)
+                   >= gtk_adjustment_get_upper(adj) - 24.0);
+}
+
+static void on_scroll_changed(GtkAdjustment *adj, gpointer user)
+{
+    App *app = user;
+    if (app->follow) {
+        gtk_adjustment_set_value(adj, gtk_adjustment_get_upper(adj)
+                                      - gtk_adjustment_get_page_size(adj));
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Keyboard: forward keystrokes to the board (focus-independent)             */
+/* ------------------------------------------------------------------------- */
+
+static void on_paste(GObject *src, GAsyncResult *res, gpointer user)
+{
+    App *app = user;
+    char *text = gdk_clipboard_read_text_finish(GDK_CLIPBOARD(src), res, NULL);
+    if (text && app->ser_fd >= 0) {
+        for (char *p = text; *p; p++) {
+            if (*p == '\n') {
+                *p = '\r';
+            }
+        }
+        ser_write(app, text, strlen(text));
+    }
+    g_free(text);
+}
+
+static gboolean on_key(GtkEventControllerKey *c, guint keyval, guint keycode,
+                       GdkModifierType state, gpointer user)
+{
+    (void)c;
+    (void)keycode;
+    App *app = user;
+    if (app->ser_fd < 0) {
+        return FALSE;
+    }
+    /* Let real text fields (baud) keep their keys. */
+    GtkWidget *focus = gtk_window_get_focus(app->win);
+    if (focus && GTK_IS_EDITABLE(focus)) {
+        return FALSE;
+    }
+
+    gboolean ctrl = (state & GDK_CONTROL_MASK) != 0;
+    if (ctrl && (keyval == GDK_KEY_c || keyval == GDK_KEY_C)) {
+        if (gtk_text_buffer_get_has_selection(app->cbuf)) {
+            return FALSE;               /* copy the selection */
+        }
+        ser_write(app, "\x03", 1);      /* else send ^C */
+        return TRUE;
+    }
+    if (ctrl && (keyval == GDK_KEY_v || keyval == GDK_KEY_V)) {
+        GdkClipboard *cb = gtk_widget_get_clipboard(GTK_WIDGET(app->cview));
+        gdk_clipboard_read_text_async(cb, NULL, on_paste, app);
+        return TRUE;
+    }
+    if (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) {
+        ser_write(app, "\r", 1);
+        return TRUE;
+    }
+    if (keyval == GDK_KEY_BackSpace || keyval == GDK_KEY_Delete) {
+        ser_write(app, "\x08", 1);
+        return TRUE;
+    }
+    if (keyval == GDK_KEY_Tab) {
+        ser_write(app, "\t", 1);
+        return TRUE;
+    }
+    if (keyval == GDK_KEY_Escape) {
+        ser_write(app, "\x1b", 1);
+        return TRUE;
+    }
+    if (ctrl) {                         /* other Ctrl-<letter> */
+        guint lk = gdk_keyval_to_lower(keyval);
+        if (lk >= GDK_KEY_a && lk <= GDK_KEY_z) {
+            char ch = (char)(lk - GDK_KEY_a + 1);
+            ser_write(app, &ch, 1);
+            return TRUE;
+        }
+    }
+    gunichar uch = gdk_keyval_to_unicode(keyval);
+    if (uch >= 0x20 && uch != 0x7f) {
+        char u[6];
+        int l = g_unichar_to_utf8(uch, u);
+        ser_write(app, u, (size_t)l);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Serial I/O + SLIP demux                                                   */
+/* ------------------------------------------------------------------------- */
+
+static void on_ip_packet(App *app, const uint8_t *pkt, size_t len)
+{
+    app->fr_in++;
+    app->by_in += (unsigned)len;
+    if (app->utun_fd >= 0) {
+        utun_write(app->utun_fd, pkt, len);    /* host bridge (later phase) */
+    }
+}
+
+static gboolean on_serial_io(gint fd, GIOCondition cond, gpointer user)
+{
+    (void)cond;
+    App *app = user;
+    uint8_t buf[4096];
+    ssize_t nr = read(fd, buf, sizeof(buf));
+    if (nr <= 0) {
+        if (nr < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return G_SOURCE_CONTINUE;
+        }
+        teardown(app);                  /* serial vanished (unplugged) */
+        return G_SOURCE_REMOVE;
+    }
+
+    /* Always demux SLIP: a frame is delimited by SLIP_END (0xC0), which the
+     * board's ASCII console output never contains, so console text falls
+     * straight through.  Console bytes are batched so console_append() sees
+     * whole runs (faster, and lets the SLIP-status detector match). */
+    GString *text = g_string_new(NULL);
+    for (ssize_t i = 0; i < nr; i++) {
+        uint8_t b = buf[i];
+        if (b == SLIP_END) {
+            if (text->len) {
+                console_append(app, text->str, (int)text->len);
+                g_string_set_size(text, 0);
+            }
+            if (app->in_frame) {
+                if (app->frame->len) {
+                    uint8_t ip[BRIDGE_MTU * 2];
+                    size_t iplen = slip_unescape(app->frame->data,
+                                                 app->frame->len, ip);
+                    on_ip_packet(app, ip, iplen);
+                }
+                g_byte_array_set_size(app->frame, 0);
+                app->in_frame = FALSE;
+            } else {
+                app->in_frame = TRUE;
+                g_byte_array_set_size(app->frame, 0);
+            }
+        } else if (app->in_frame) {
+            g_byte_array_append(app->frame, &b, 1);
+        } else {
+            g_string_append_c(text, (char)b);
+        }
+    }
+    if (text->len) {
+        console_append(app, text->str, (int)text->len);
+    }
+    g_string_free(text, TRUE);
+    return G_SOURCE_CONTINUE;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Connect / disconnect                                                      */
+/* ------------------------------------------------------------------------- */
+
+static void do_connect(App *app)
+{
+    if (app->ser_fd >= 0) {
+        teardown(app);
+        return;
+    }
+    if (!app->port_path[0]) {
+        set_status(app, "no serial port -- plug in a board and rescan", TRUE);
+        return;
+    }
+    unsigned baud = (unsigned)atoi(gtk_editable_get_text(GTK_EDITABLE(app->baud)));
+    int fd = serial_open(app->port_path, baud);
+    if (fd < 0) {
+        char e[400];
+        snprintf(e, sizeof(e), "error opening %s: %s", app->port_path,
+                 strerror(errno));
+        set_status(app, e, TRUE);
+        return;
+    }
+    app->ser_fd = fd;
+    app->ser_watch = g_unix_fd_add(fd, G_IO_IN, on_serial_io, app);
+    gtk_button_set_label(GTK_BUTTON(app->connect_btn), "Disconnect");
+    gtk_widget_remove_css_class(GTK_WIDGET(app->cview), "console-off");
+    update_leds(app);
+
+    char st[420];
+    snprintf(st, sizeof(st), "connected to %s @ %u baud", app->port_path, baud);
+    set_status(app, st, FALSE);
+    static const char *hello =
+        "[tikuconsole] connected (console mode) -- type away.\n";
+    console_append(app, hello, (int)strlen(hello));
+    gtk_widget_grab_focus(GTK_WIDGET(app->cview));
+}
+
+static void teardown(App *app)
+{
+    if (app->ser_watch) {
+        g_source_remove(app->ser_watch);
+        app->ser_watch = 0;
+    }
+    if (app->ser_fd >= 0) {
+        close(app->ser_fd);
+        app->ser_fd = -1;
+    }
+    app->slip_on = FALSE;
+    app->in_frame = FALSE;
+    g_byte_array_set_size(app->frame, 0);
+    gtk_button_set_label(GTK_BUTTON(app->connect_btn), "Connect");
+    gtk_widget_add_css_class(GTK_WIDGET(app->cview), "console-off");
+    update_leds(app);
+    set_status(app, "disconnected", FALSE);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Ports                                                                     */
+/* ------------------------------------------------------------------------- */
+
+static void port_changed_core(App *app)
+{
+    guint i = gtk_drop_down_get_selected(GTK_DROP_DOWN(app->port_dd));
+    if (i < (guint)app->n_ports) {
+        port_info_t *p = &app->ports[i];
+        strlcpy(app->port_path, p->device, sizeof(app->port_path));
+        gtk_label_set_text(GTK_LABEL(app->platform_lbl), p->label);
+        if (app->ser_fd < 0) {          /* don't fight a live session */
+            char b[16];
+            snprintf(b, sizeof(b), "%u", p->baud);
+            gtk_editable_set_text(GTK_EDITABLE(app->baud), b);
+        }
+    } else {
+        app->port_path[0] = '\0';
+        gtk_label_set_text(GTK_LABEL(app->platform_lbl), "--");
+    }
+}
+
+static void on_port_changed(GObject *o, GParamSpec *ps, gpointer user)
+{
+    (void)o;
+    (void)ps;
+    port_changed_core((App *)user);
+}
+
+static void refresh_ports(App *app)
+{
+    app->n_ports = ports_scan(app->ports, PORTS_MAX);
+    GtkStringList *sl = gtk_string_list_new(NULL);
+    if (app->n_ports == 0) {
+        gtk_string_list_append(sl, "(no USB serial ports)");
+    } else {
+        for (int i = 0; i < app->n_ports; i++) {
+            const char *dev = app->ports[i].device;
+            const char *base = strrchr(dev, '/');
+            base = base ? base + 1 : dev;
+            char lbl[340];
+            snprintf(lbl, sizeof(lbl), "%s  \xc2\xb7  %s", base,
+                     app->ports[i].label);
+            gtk_string_list_append(sl, lbl);
+        }
+    }
+    gtk_drop_down_set_model(GTK_DROP_DOWN(app->port_dd), G_LIST_MODEL(sl));
+    g_object_unref(sl);
+
+    guint sel = 0;
+    for (int i = 0; i < app->n_ports; i++) {
+        if (strcmp(app->ports[i].label, "unknown") != 0) {  /* prefer a board */
+            sel = (guint)i;
+            break;
+        }
+    }
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(app->port_dd), sel);
+    port_changed_core(app);
+}
+
+static void on_refresh_clicked(GtkButton *b, gpointer user)
+{
+    (void)b;
+    refresh_ports((App *)user);
+}
+
+static void on_connect_clicked(GtkButton *b, gpointer user)
+{
+    (void)b;
+    do_connect((App *)user);
+}
+
+static gboolean on_net_toggle(GtkSwitch *sw, gboolean state, gpointer user)
+{
+    (void)sw;
+    App *app = user;
+    if (app->ser_fd < 0) {
+        set_status(app, "connect first, then enable Networking", FALSE);
+        return FALSE;                   /* let the switch reflect the choice */
+    }
+    if (state) {
+        send_line(app, "slip");
+        set_status(app, "SLIP requested on the board -- the host bridge "
+                        "(ping/NAT panel) lands in the next phase.", FALSE);
+    } else {
+        send_line(app, "slip off");
+    }
+    return FALSE;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Window assembly                                                           */
+/* ------------------------------------------------------------------------- */
+
+static void install_css(void)
+{
+    static const char *data =
+        "textview.console, textview.console text {"
+        " background-color:#0b0b0b; color:#cccccc;"
+        " font-family:\"Menlo\",\"SF Mono\",\"Monaco\",monospace;"
+        " font-size:11pt; }"
+        "textview.console { padding:4px; }"
+        "textview.console.console-off { opacity:0.45; }";
+    GtkCssProvider *css = gtk_css_provider_new();
+    gtk_css_provider_load_from_string(css, data);
+    gtk_style_context_add_provider_for_display(
+        gdk_display_get_default(), GTK_STYLE_PROVIDER(css),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(css);
+}
+
+static void make_console_tags(App *app)
+{
+    static const struct { int code; const char *color; } PAL[] = {
+        {30, "#666666"}, {31, "#ff6b6b"}, {32, GREEN},    {33, "#fce94f"},
+        {34, "#729fcf"}, {35, "#ad7fa8"}, {36, "#34e2e2"}, {37, "#d3d7cf"},
+    };
+    for (int i = 0; i < 8; i++) {
+        app->tag_fg[i] = gtk_text_buffer_create_tag(app->cbuf, NULL,
+            "foreground", PAL[i].color, NULL);
+    }
+    app->tag_bold = gtk_text_buffer_create_tag(app->cbuf, NULL,
+        "weight", PANGO_WEIGHT_BOLD, NULL);
+    app->tag_dim = gtk_text_buffer_create_tag(app->cbuf, NULL,
+        "foreground", "#7f7f7f", NULL);
+}
+
+static GtkWidget *vsep(void)
+{
+    return gtk_separator_new(GTK_ORIENTATION_VERTICAL);
+}
+
+/* CI smoke test: TIKUCONSOLE_SMOKE_MS builds the window then quits, so the
+ * whole activate path can be exercised headlessly. */
+static gboolean smoke_quit(gpointer user)
+{
+    g_application_quit(G_APPLICATION(((App *)user)->app));
+    return G_SOURCE_REMOVE;
+}
+
+static void activate(GtkApplication *gapp, gpointer user)
+{
+    App *app = user;
+    install_css();
+
+    GtkWidget *win = gtk_application_window_new(gapp);
+    app->win = GTK_WINDOW(win);
+    gtk_window_set_title(app->win, "TikuConsole");
+    gtk_window_set_default_size(app->win, 960, 600);
+    gtk_window_set_titlebar(app->win, gtk_header_bar_new());
+
+    GtkWidget *root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_widget_set_margin_top(root, 8);
+    gtk_widget_set_margin_bottom(root, 8);
+    gtk_widget_set_margin_start(root, 8);
+    gtk_widget_set_margin_end(root, 8);
+    gtk_window_set_child(app->win, root);
+
+    /* --- banner row: title (left) + status lights (right) --- */
+    GtkWidget *brow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *banner = gtk_label_new(NULL);
+    gtk_label_set_xalign(GTK_LABEL(banner), 0);
+    gtk_widget_set_hexpand(banner, TRUE);
+    char bmk[600];
+    snprintf(bmk, sizeof(bmk),
+        "<span size='xx-large' weight='bold' foreground='%s'>TikuConsole</span>"
+        "  <span size='small' foreground='#888888'>v%s</span>\n"
+        "<span size='small' foreground='#888888'>serial console for TikuOS "
+        "devices  \xc2\xb7  networking optional</span>", GREEN, VERSION);
+    gtk_label_set_markup(GTK_LABEL(banner), bmk);
+    gtk_box_append(GTK_BOX(brow), banner);
+
+    GtkWidget *leds = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 14);
+    gtk_widget_set_valign(leds, GTK_ALIGN_CENTER);
+    gtk_widget_set_halign(leds, GTK_ALIGN_END);
+    app->usb_led = gtk_label_new(NULL);
+    app->slip_led = gtk_label_new(NULL);
+    app->nat_led = gtk_label_new(NULL);
+    gtk_box_append(GTK_BOX(leds), app->usb_led);
+    gtk_box_append(GTK_BOX(leds), app->slip_led);
+    gtk_box_append(GTK_BOX(leds), app->nat_led);
+    gtk_box_append(GTK_BOX(brow), leds);
+    gtk_box_append(GTK_BOX(root), brow);
+
+    /* --- connection bar --- */
+    GtkWidget *bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_box_append(GTK_BOX(bar), gtk_label_new("Port"));
+    app->port_dd = gtk_drop_down_new(G_LIST_MODEL(gtk_string_list_new(NULL)),
+                                     NULL);
+    g_signal_connect(app->port_dd, "notify::selected",
+                     G_CALLBACK(on_port_changed), app);
+    gtk_box_append(GTK_BOX(bar), app->port_dd);
+    GtkWidget *refresh = gtk_button_new_with_label("\xe2\x9f\xb3");
+    gtk_widget_set_tooltip_text(refresh, "Rescan ports");
+    g_signal_connect(refresh, "clicked", G_CALLBACK(on_refresh_clicked), app);
+    gtk_box_append(GTK_BOX(bar), refresh);
+    app->platform_lbl = gtk_label_new("--");
+    gtk_widget_add_css_class(app->platform_lbl, "dim-label");
+    gtk_box_append(GTK_BOX(bar), app->platform_lbl);
+    gtk_box_append(GTK_BOX(bar), vsep());
+    gtk_box_append(GTK_BOX(bar), gtk_label_new("Baud"));
+    app->baud = gtk_entry_new();
+    gtk_editable_set_text(GTK_EDITABLE(app->baud), "115200");
+    gtk_editable_set_max_width_chars(GTK_EDITABLE(app->baud), 7);
+    gtk_box_append(GTK_BOX(bar), app->baud);
+    gtk_box_append(GTK_BOX(bar), vsep());
+    gtk_box_append(GTK_BOX(bar), gtk_label_new("Networking"));
+    app->net_sw = gtk_switch_new();
+    gtk_widget_set_valign(app->net_sw, GTK_ALIGN_CENTER);
+    gtk_widget_set_tooltip_text(app->net_sw,
+        "Toggle the board's SLIP/IP mode over the same wire");
+    g_signal_connect(app->net_sw, "state-set", G_CALLBACK(on_net_toggle), app);
+    gtk_box_append(GTK_BOX(bar), app->net_sw);
+    app->connect_btn = gtk_button_new_with_label("Connect");
+    gtk_widget_add_css_class(app->connect_btn, "suggested-action");
+    gtk_widget_set_hexpand(app->connect_btn, TRUE);
+    gtk_widget_set_halign(app->connect_btn, GTK_ALIGN_END);
+    g_signal_connect(app->connect_btn, "clicked",
+                     G_CALLBACK(on_connect_clicked), app);
+    gtk_box_append(GTK_BOX(bar), app->connect_btn);
+    gtk_box_append(GTK_BOX(root), bar);
+
+    /* --- status line --- */
+    app->status = gtk_label_new("disconnected");
+    gtk_label_set_xalign(GTK_LABEL(app->status), 0);
+    gtk_label_set_selectable(GTK_LABEL(app->status), TRUE);
+    gtk_label_set_wrap(GTK_LABEL(app->status), TRUE);
+    gtk_box_append(GTK_BOX(root), app->status);
+
+    /* --- console --- */
+    GtkWidget *sw = gtk_scrolled_window_new();
+    gtk_widget_set_vexpand(sw, TRUE);
+    app->cview = GTK_TEXT_VIEW(gtk_text_view_new());
+    gtk_text_view_set_editable(app->cview, FALSE);
+    gtk_text_view_set_monospace(app->cview, TRUE);
+    gtk_text_view_set_wrap_mode(app->cview, GTK_WRAP_CHAR);
+    app->cbuf = gtk_text_view_get_buffer(app->cview);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sw),
+                                  GTK_WIDGET(app->cview));
+    app->cadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(sw));
+    gtk_widget_add_css_class(GTK_WIDGET(app->cview), "console");
+    gtk_widget_add_css_class(GTK_WIDGET(app->cview), "console-off");
+    make_console_tags(app);
+    g_signal_connect(app->cadj, "value-changed",
+                     G_CALLBACK(on_scroll_value), app);
+    g_signal_connect(app->cadj, "changed",
+                     G_CALLBACK(on_scroll_changed), app);
+    gtk_box_append(GTK_BOX(root), sw);
+
+    /* Type straight into the console from anywhere in the window. */
+    GtkEventController *kc = gtk_event_controller_key_new();
+    gtk_event_controller_set_propagation_phase(kc, GTK_PHASE_CAPTURE);
+    g_signal_connect(kc, "key-pressed", G_CALLBACK(on_key), app);
+    gtk_widget_add_controller(win, kc);
+
+    refresh_ports(app);
+    update_leds(app);
+    gtk_window_present(app->win);
+
+    const char *smoke = g_getenv("TIKUCONSOLE_SMOKE_MS");
+    if (smoke) {
+        int ms = atoi(smoke);
+        g_timeout_add(ms > 0 ? (guint)ms : 1, smoke_quit, app);
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* main                                                                      */
+/* ------------------------------------------------------------------------- */
+
+int main(int argc, char **argv)
+{
+    App *app = g_new0(App, 1);
+    app->ser_fd = -1;
+    app->utun_fd = -1;
+    app->follow = TRUE;
+    app->frame = g_byte_array_new();
+    app->ansi_pending = g_string_new(NULL);
+    app->slip_scan = g_string_new(NULL);
+
+    app->app = gtk_application_new("org.tikuos.tikuconsole",
+                                   G_APPLICATION_DEFAULT_FLAGS);
+    g_signal_connect(app->app, "activate", G_CALLBACK(activate), app);
+    int status = g_application_run(G_APPLICATION(app->app), argc, argv);
+
+    g_object_unref(app->app);
+    g_byte_array_free(app->frame, TRUE);
+    g_string_free(app->ansi_pending, TRUE);
+    g_string_free(app->slip_scan, TRUE);
+    g_free(app);
+    return status;
+}
