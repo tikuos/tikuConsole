@@ -569,6 +569,33 @@ static gboolean on_net_toggle(GtkSwitch *sw, gboolean state, gpointer user)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Hooks for the build bar (gui_build.c)                                     */
+/* ------------------------------------------------------------------------- */
+
+void gui_disconnect(App *app)
+{
+    if (app->ser_fd >= 0) {
+        teardown(app);                  /* flashing reuses the same debugger */
+    }
+}
+
+gboolean gui_autoconnect_step(App *app)
+{
+    if (app->ser_fd >= 0) {
+        return TRUE;
+    }
+    refresh_ports(app);
+    if (app->port_path[0]) {
+        do_connect(app);
+        if (app->ser_fd >= 0) {
+            gtk_widget_grab_focus(GTK_WIDGET(app->cview));
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/* ------------------------------------------------------------------------- */
 /* Window assembly                                                           */
 /* ------------------------------------------------------------------------- */
 
@@ -654,6 +681,9 @@ static void activate(GtkApplication *gapp, gpointer user)
     gtk_box_append(GTK_BOX(leds), app->nat_led);
     gtk_box_append(GTK_BOX(brow), leds);
     gtk_box_append(GTK_BOX(root), brow);
+
+    /* --- firmware build/flash bar (compile + program from here) --- */
+    gtk_box_append(GTK_BOX(root), build_buildbar(app));
 
     /* --- connection bar --- */
     GtkWidget *bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
@@ -749,6 +779,7 @@ static void activate(GtkApplication *gapp, gpointer user)
     if (smoke) {
         gtk_widget_set_visible(app->netpanel, TRUE);  /* exercise the panel +
                                                           its drawing areas */
+        bld_debug_dump(app);                          /* proj_dir + make flags */
         int ms = atoi(smoke);
         g_timeout_add(ms > 0 ? (guint)ms : 1, smoke_quit, app);
     }

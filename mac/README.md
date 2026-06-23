@@ -42,6 +42,13 @@ is on `PATH` so `pkg-config` resolves `gtk4`.
 ./tikuconsole
 ```
 
+0. **Firmware bar** (top): pick an **MCU** and tick the features you want —
+   **shell**, **networking**, **BASIC**, **colour** — then **Build & Flash**.
+   It runs `make clean` → `make` → `make flash` in the tikuOS root, streams the
+   output into the console, and auto-connects to the freshly flashed board.
+   (Needs the tikuOS tree + that board's toolchain; the Makefile does the
+   flashing. Both Ambiq EVBs share a USB id, so pick apollo510 vs apollo4l by
+   hand.)
 1. Plug in a board — the port and platform auto-fill (Apollo / MSP430 / RP2350
    are fingerprinted by USB id), and the baud follows. Click **Connect**.
 2. Type into the console — keystrokes go to the board from anywhere in the
@@ -83,10 +90,10 @@ board is a host on your Mac: `ping 172.16.7.2`. Quit with **Ctrl-]**.
 
 - **Done:** the shared bridge core (SLIP / serial / utun); the `slmux` CLI; and
   the `tikuconsole` GUI — console + connection (port fingerprinting, ANSI
-  colour, focus-independent key routing, always-on SLIP demux) **and** the
-  networking side-panel: SLIP toggle + counters, rootless in-app ping (RTT
-  sparkline + packet animation), the host `utun` bridge, the rootless UDP relay
-  (DNS/NTP, with DNS-fit for the board's 128 B MTU), and `pf` NAT (the Linux
-  `iptables MASQUERADE` equivalent).
-- **Next:** the firmware build/flash bar and the splash screen — the last of the
-  Linux app's panels.
+  colour, focus-independent key routing, always-on SLIP demux); the networking
+  side-panel (SLIP toggle + counters, rootless in-app ping with RTT sparkline +
+  packet animation, the host `utun` bridge, the rootless UDP relay with DNS-fit
+  for the board's 128 B MTU, and `pf` NAT — the `iptables MASQUERADE`
+  equivalent); and the **firmware build/flash bar** (MCU + feature selection,
+  streamed `make clean`/`make`/`make flash`, auto-connect on success).
+- **Next:** the splash screen — the last cosmetic piece of the Linux app.

@@ -109,6 +109,21 @@ typedef struct App {
     GtkTextView   *ping_view;
     GtkTextBuffer *ping_buf;
     GtkTextTag    *ping_ok, *ping_bad;
+
+    /* firmware build/flash bar */
+    gboolean     bld_running;
+    int          bld_step;             /* 0 clean, 1 build, 2 flash */
+    int          bld_nflag;
+    char        *bld_flagv[40];        /* g_strdup'd make flags */
+    int          bld_nradios;
+    GtkWidget   *bld_radios[8];        /* one MCU radio per board */
+    GtkWidget   *bld_btn;
+    GtkWidget   *bld_shell, *bld_net, *bld_basic, *bld_color;
+    GSubprocess *bld_proc;
+    char         proj_dir[1024];       /* the tikuOS root (where make runs) */
+    char         bld_board_key[32];
+    int          bld_board_baud;
+    int          bld_try;
 } App;
 
 /* --- gui.c (shared helpers) --- */
@@ -124,6 +139,14 @@ void net_apply(App *app, gboolean active);
 void net_down(App *app);
 void net_on_ip_packet(App *app, const uint8_t *pkt, size_t len);
 gboolean net_counters_tick(gpointer user);
+
+/* --- gui.c (for the build bar) --- */
+gboolean gui_autoconnect_step(App *app);  /* refresh + connect; TRUE if up */
+void gui_disconnect(App *app);            /* free the port before flashing */
+
+/* --- gui_build.c --- */
+GtkWidget *build_buildbar(App *app);
+void bld_debug_dump(App *app);            /* smoke: print proj_dir + flags */
 
 /* --- gui_ping.c --- */
 void ping_start(App *app, const char *target);

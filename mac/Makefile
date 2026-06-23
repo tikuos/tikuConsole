@@ -20,7 +20,7 @@ all: slmux tikuconsole
 slmux: slmux.c bridge.c bridge.h
 	$(CC) $(CFLAGS) -o $@ slmux.c bridge.c
 
-GUI_SRC := gui.c gui_net.c gui_ping.c bridge.c ports.c packets.c
+GUI_SRC := gui.c gui_net.c gui_ping.c gui_build.c bridge.c ports.c packets.c
 GUI_HDR := gui.h bridge.h ports.h packets.h
 
 tikuconsole: $(GUI_SRC) $(GUI_HDR)
