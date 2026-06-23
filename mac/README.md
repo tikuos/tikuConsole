@@ -42,13 +42,15 @@ is on `PATH` so `pkg-config` resolves `gtk4`.
 ./tikuconsole
 ```
 
-0. **Firmware bar** (top): pick an **MCU** and tick the features you want —
+0. **Firmware bar** (top): pick a **Microcontroller** — grouped by family
+   (**MSP430** · **Apollo** · **Raspberry Pi**); the attached board's family
+   auto-selects (until you choose one yourself). Tick the features you want —
    **shell**, **networking**, **BASIC**, **colour** — then **Build & Flash**.
    It runs `make clean` → `make` → `make flash` in the tikuOS root, streams the
    output into the console, and auto-connects to the freshly flashed board.
    (Needs the tikuOS tree + that board's toolchain; the Makefile does the
-   flashing. Both Ambiq EVBs share a USB id, so pick apollo510 vs apollo4l by
-   hand.)
+   flashing. The two Apollo variants — and the three MSP430 variants — share a
+   USB id, so the family is detected but pick the exact variant by hand.)
 1. Plug in a board — the port and platform auto-fill (Apollo / MSP430 / RP2350
    are fingerprinted by USB id), and the baud follows. Click **Connect**.
 2. Type into the console — keystrokes go to the board from anywhere in the

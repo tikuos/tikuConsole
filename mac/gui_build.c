@@ -29,21 +29,25 @@
 
 #include "gui.h"
 
-/* Board profiles -- mirrors TikuBench's BOARDS (key, MCU, family, baud). */
+/* Board profiles -- mirrors TikuBench's BOARDS, plus friendly display names for
+ * the grouped picker.  Kept grouped by family (contiguous) so the bar can frame
+ * each subcategory in one pass. */
 typedef struct {
-    const char *key;
+    const char *key;       /* TikuBench board key / make MCU= value */
     const char *mcu;
-    const char *family;
+    const char *family;    /* "msp430" | "rp2350" | "ambiq" */
     int         baud;
+    const char *fam_disp;  /* subcategory header, e.g. "MSP430" */
+    const char *var_disp;  /* variant radio label, e.g. "FR5994" */
 } board_t;
 
 static const board_t BOARDS[] = {
-    {"msp430fr5969", "msp430fr5969", "msp430", 9600},
-    {"msp430fr5994", "msp430fr5994", "msp430", 9600},
-    {"msp430fr6989", "msp430fr6989", "msp430", 9600},
-    {"rp2350",       "rp2350",       "rp2350", 115200},
-    {"apollo510",    "apollo510",    "ambiq",  115200},
-    {"apollo4l",     "apollo4l",     "ambiq",  115200},
+    {"msp430fr5969", "msp430fr5969", "msp430", 9600,   "MSP430",       "FR5969"},
+    {"msp430fr5994", "msp430fr5994", "msp430", 9600,   "MSP430",       "FR5994"},
+    {"msp430fr6989", "msp430fr6989", "msp430", 9600,   "MSP430",       "FR6989"},
+    {"apollo510",    "apollo510",    "ambiq",  115200, "Apollo",       "Apollo510"},
+    {"apollo4l",     "apollo4l",     "ambiq",  115200, "Apollo",       "Apollo4 Lite"},
+    {"rp2350",       "rp2350",       "rp2350", 115200, "Raspberry Pi", "RP2350"},
 };
 #define N_BOARDS ((int)(sizeof(BOARDS) / sizeof(BOARDS[0])))
 
@@ -384,13 +388,33 @@ static void on_build_flash(GtkButton *btn, gpointer user)
 /* Bar assembly                                                              */
 /* ------------------------------------------------------------------------- */
 
-/* Preselect the MCU matching a currently-attached device, if any. */
-static void bld_select_default(App *app)
+/* A user toggling an MCU stops auto-select from overriding their choice. */
+static void on_mcu_toggled(GtkCheckButton *rb, gpointer user)
 {
-    int idx = 0;
+    App *app = user;
+    if (app->bld_set_programmatic) {
+        return;                                /* our own set_active, not a click */
+    }
+    if (gtk_check_button_get_active(rb)) {
+        app->bld_user_picked = TRUE;
+    }
+}
+
+/* Auto-select the MCU family of a currently-attached board.  Detection is
+ * family-level only: the variants within a family share a USB id (eZ-FET for
+ * the MSP430s, the J-Link VCOM for both Apollos), so it selects the family's
+ * default variant and leaves the exact pick to the now-grouped radios.  No-ops
+ * once the user has chosen, and when nothing is attached (keeps the current
+ * selection). */
+void bld_autoselect(App *app)
+{
+    if (app->bld_user_picked || app->bld_nradios == 0) {
+        return;
+    }
     port_info_t p[PORTS_MAX];
     int n = ports_scan(p, PORTS_MAX);
-    for (int i = 0; i < n; i++) {
+    int idx = -1;
+    for (int i = 0; i < n && idx < 0; i++) {
         char plat[64];
         g_strlcpy(plat, p[i].label, sizeof(plat));
         for (char *q = plat; *q; q++) {
@@ -398,7 +422,7 @@ static void bld_select_default(App *app)
         }
         const char *key = NULL;
         if (strstr(plat, "apollo")) {
-            key = "apollo4l";                  /* both Ambiq EVBs share the VID */
+            key = "apollo510";                 /* family default (510 vs 4 Lite) */
         } else if (strstr(plat, "rp2") || strstr(plat, "pico")) {
             key = "rp2350";
         } else if (strstr(plat, "msp")) {
@@ -411,33 +435,57 @@ static void bld_select_default(App *app)
                     break;
                 }
             }
-            break;
         }
     }
-    if (app->bld_nradios > 0) {
-        gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_radios[idx]), TRUE);
+    if (idx < 0) {
+        return;                                /* nothing attached -> keep pick */
     }
+    app->bld_set_programmatic = TRUE;
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_radios[idx]), TRUE);
+    app->bld_set_programmatic = FALSE;
 }
 
 GtkWidget *build_buildbar(App *app)
 {
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
 
-    /* Row 1: MCU as a radio group -- one per board. */
-    GtkWidget *mrow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    gtk_box_append(GTK_BOX(mrow), gtk_label_new("MCU"));
+    /* Row 1: Microcontroller, grouped by family into framed subcategories.
+     * One shared radio group across all families -> exactly one board total. */
+    GtkWidget *mrow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *mlbl = gtk_label_new("Microcontroller");
+    gtk_widget_set_valign(mlbl, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(mrow), mlbl);
     app->bld_nradios = 0;
     GtkWidget *group = NULL;
+    GtkWidget *fam_box = NULL;
+    const char *cur_fam = NULL;
     for (int i = 0; i < N_BOARDS; i++) {
-        GtkWidget *rb = gtk_check_button_new_with_label(BOARDS[i].key);
+        if (cur_fam == NULL || strcmp(cur_fam, BOARDS[i].fam_disp) != 0) {
+            GtkWidget *frame = gtk_frame_new(BOARDS[i].fam_disp);
+            gtk_widget_set_valign(frame, GTK_ALIGN_START);
+            fam_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+            gtk_widget_set_margin_start(fam_box, 6);
+            gtk_widget_set_margin_end(fam_box, 6);
+            gtk_widget_set_margin_top(fam_box, 2);
+            gtk_widget_set_margin_bottom(fam_box, 4);
+            gtk_frame_set_child(GTK_FRAME(frame), fam_box);
+            gtk_box_append(GTK_BOX(mrow), frame);
+            cur_fam = BOARDS[i].fam_disp;
+        }
+        GtkWidget *rb = gtk_check_button_new_with_label(BOARDS[i].var_disp);
         if (group == NULL) {                   /* CheckButton + group = radio */
             group = rb;
         } else {
             gtk_check_button_set_group(GTK_CHECK_BUTTON(rb),
                                        GTK_CHECK_BUTTON(group));
         }
+        char tip[96];
+        snprintf(tip, sizeof(tip), "make MCU=%s \xc2\xb7 %d baud",
+                 BOARDS[i].mcu, BOARDS[i].baud);
+        gtk_widget_set_tooltip_text(rb, tip);
+        g_signal_connect(rb, "toggled", G_CALLBACK(on_mcu_toggled), app);
         app->bld_radios[app->bld_nradios++] = rb;
-        gtk_box_append(GTK_BOX(mrow), rb);
+        gtk_box_append(GTK_BOX(fam_box), rb);
     }
     gtk_box_append(GTK_BOX(box), mrow);
 
@@ -472,7 +520,13 @@ GtkWidget *build_buildbar(App *app)
     gtk_box_append(GTK_BOX(frow), app->bld_btn);
     gtk_box_append(GTK_BOX(box), frow);
 
-    bld_select_default(app);
+    /* A baseline pick (so one is always selected), then auto-detect the
+     * attached board's family on top -- both programmatic, so neither counts
+     * as the user choosing. */
+    app->bld_set_programmatic = TRUE;
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_radios[0]), TRUE);
+    app->bld_set_programmatic = FALSE;
+    bld_autoselect(app);
     return box;
 }
 

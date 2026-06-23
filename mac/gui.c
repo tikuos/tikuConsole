@@ -538,6 +538,7 @@ static void refresh_ports(App *app)
     }
     gtk_drop_down_set_selected(GTK_DROP_DOWN(app->port_dd), sel);
     port_changed_core(app);
+    bld_autoselect(app);            /* re-detect the board's MCU family too */
 }
 
 static void on_refresh_clicked(GtkButton *b, gpointer user)

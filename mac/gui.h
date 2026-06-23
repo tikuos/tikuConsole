@@ -124,6 +124,8 @@ typedef struct App {
     char         bld_board_key[32];
     int          bld_board_baud;
     int          bld_try;
+    gboolean     bld_user_picked;      /* user chose an MCU -> stop auto-select */
+    gboolean     bld_set_programmatic; /* guard: ignore our own radio toggles */
 
     /* startup splash */
     GtkWidget   *splash, *splash_load, *splash_prog;
@@ -150,6 +152,7 @@ void gui_disconnect(App *app);            /* free the port before flashing */
 
 /* --- gui_build.c --- */
 GtkWidget *build_buildbar(App *app);
+void bld_autoselect(App *app);            /* select the attached board's family */
 void bld_debug_dump(App *app);            /* smoke: print proj_dir + flags */
 
 /* --- gui_splash.c --- */
