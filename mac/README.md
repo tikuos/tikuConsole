@@ -94,6 +94,12 @@ board is a host on your Mac: `ping 172.16.7.2`. Quit with **Ctrl-]**.
   side-panel (SLIP toggle + counters, rootless in-app ping with RTT sparkline +
   packet animation, the host `utun` bridge, the rootless UDP relay with DNS-fit
   for the board's 128 B MTU, and `pf` NAT — the `iptables MASQUERADE`
-  equivalent); and the **firmware build/flash bar** (MCU + feature selection,
-  streamed `make clean`/`make`/`make flash`, auto-connect on success).
-- **Next:** the splash screen — the last cosmetic piece of the Linux app.
+  equivalent); the **firmware build/flash bar** (MCU + feature selection,
+  streamed `make clean`/`make`/`make flash`, auto-connect on success); and the
+  **startup splash**.
+- This is now at **1:1 module parity** with the Linux Python app — console,
+  connection, LEDs, networking panel, ping, NAT, build bar, and splash.
+
+`TIKUCONSOLE_NO_SPLASH=1` skips the splash; `TIKUCONSOLE_SMOKE_MS=N` builds the
+window and quits after N ms (CI smoke). Set `TIKUOS_DIR` to point the build bar
+at the repo root if it isn't found automatically.

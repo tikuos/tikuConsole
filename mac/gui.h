@@ -124,6 +124,10 @@ typedef struct App {
     char         bld_board_key[32];
     int          bld_board_baud;
     int          bld_try;
+
+    /* startup splash */
+    GtkWidget   *splash, *splash_load, *splash_prog;
+    int          splash_ticks;
 } App;
 
 /* --- gui.c (shared helpers) --- */
@@ -147,6 +151,9 @@ void gui_disconnect(App *app);            /* free the port before flashing */
 /* --- gui_build.c --- */
 GtkWidget *build_buildbar(App *app);
 void bld_debug_dump(App *app);            /* smoke: print proj_dir + flags */
+
+/* --- gui_splash.c --- */
+void show_splash(App *app);               /* presents the main window when done */
 
 /* --- gui_ping.c --- */
 void ping_start(App *app, const char *target);

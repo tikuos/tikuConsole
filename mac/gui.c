@@ -607,7 +607,21 @@ static void install_css(void)
         " font-family:\"Menlo\",\"SF Mono\",\"Monaco\",monospace;"
         " font-size:11pt; }"
         "textview.console { padding:4px; }"
-        "textview.console.console-off { opacity:0.45; }";
+        "textview.console.console-off { opacity:0.45; }"
+        ".splash { background-image:"
+        " linear-gradient(165deg,#ffffff 0%,#f4eee1 100%); }"
+        ".splash-body { padding:6px 40px 20px 40px; }"
+        ".splash-accent { background-image:"
+        " linear-gradient(90deg,#1f6fc4 0%,#2e9e54 52%,#f0a91e 100%); }"
+        ".splash-title { font-size:28pt; font-weight:bold; color:#14457f; }"
+        ".splash-sub { font-size:12pt; color:#5b6b79; }"
+        ".splash-author { font-size:13pt; font-weight:bold; color:#1565c0; }"
+        ".splash-lic { font-size:9pt; color:#8a8a8a; }"
+        ".splash-load { font-size:11pt; font-weight:bold; color:#2e7d32; }"
+        ".splash progressbar > trough,"
+        " .splash progressbar > trough > progress { min-height:9px; }"
+        ".splash progressbar > trough > progress { background-image:"
+        " linear-gradient(90deg,#1f6fc4,#2e9e54,#f0a91e); }";
     GtkCssProvider *css = gtk_css_provider_new();
     gtk_css_provider_load_from_string(css, data);
     gtk_style_context_add_provider_for_display(
@@ -773,9 +787,18 @@ static void activate(GtkApplication *gapp, gpointer user)
     g_timeout_add(500, net_counters_tick, app);
     refresh_ports(app);
     update_leds(app);
-    gtk_window_present(app->win);
 
     const char *smoke = g_getenv("TIKUCONSOLE_SMOKE_MS");
+    gboolean force_splash = g_getenv("TIKUCONSOLE_FORCE_SPLASH") != NULL;
+    gboolean direct = (smoke != NULL ||
+                       g_getenv("TIKUCONSOLE_NO_SPLASH") != NULL) && !force_splash;
+    if (direct) {
+        gtk_window_present(app->win);
+        gtk_widget_grab_focus(GTK_WIDGET(app->cview));
+    } else {
+        show_splash(app);                  /* presents the main window when done */
+    }
+
     if (smoke) {
         gtk_widget_set_visible(app->netpanel, TRUE);  /* exercise the panel +
                                                           its drawing areas */
