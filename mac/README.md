@@ -47,10 +47,16 @@ is on `PATH` so `pkg-config` resolves `gtk4`.
 2. Type into the console — keystrokes go to the board from anywhere in the
    window; the boot log is ANSI-coloured like `picocom`.
 3. The three lights track the **USB** link, the board's **SLIP** mode, and host
-   **Internet** (NAT). Flip **Networking** to toggle SLIP on the board.
+   **Internet** (NAT). Flip **Networking** to reveal the side-panel:
+   - **Toggle SLIP** on the board, watch the frame/byte counters.
+   - **Ping** the board (rootless ICMP-over-SLIP) — an RTT sparkline + a live
+     packet animation, no system `ping` needed.
+   - As root: the host **`utun`** bridge comes up (so the macOS kernel pings the
+     board), and the **NAT** switch gives the board the internet via `pf`.
 
-Console mode needs no root. (The host `utun` bridge — full ping/NAT — is the
-next GUI phase; for it today use `slmux` below.)
+Console mode and the in-app ping need **no root**. Even without it, the board
+reaches DNS/NTP through a userspace UDP relay. The kernel `utun` bridge + `pf`
+NAT need `sudo` (relaunch `sudo ./tikuconsole`).
 
 ## Run — the CLI
 
@@ -75,10 +81,12 @@ board is a host on your Mac: `ping 172.16.7.2`. Quit with **Ctrl-]**.
 
 ## Status
 
-- **Done:** the shared bridge core (SLIP / serial / utun), the `slmux` CLI, and
-  the `tikuconsole` GUI's console + connection (port fingerprinting, ANSI
-  colour, focus-independent key routing, always-on SLIP demux).
-- **Next:** the GUI networking side-panel (host `utun` bridge, in-app ping with
-  the RTT chart, NAT switch) and the firmware build/flash bar — the rest of the
-  Linux app's panels. Board → internet NAT on macOS becomes a `pf` anchor or a
-  small userspace relay (the Linux `iptables MASQUERADE` equivalent).
+- **Done:** the shared bridge core (SLIP / serial / utun); the `slmux` CLI; and
+  the `tikuconsole` GUI — console + connection (port fingerprinting, ANSI
+  colour, focus-independent key routing, always-on SLIP demux) **and** the
+  networking side-panel: SLIP toggle + counters, rootless in-app ping (RTT
+  sparkline + packet animation), the host `utun` bridge, the rootless UDP relay
+  (DNS/NTP, with DNS-fit for the board's 128 B MTU), and `pf` NAT (the Linux
+  `iptables MASQUERADE` equivalent).
+- **Next:** the firmware build/flash bar and the splash screen — the last of the
+  Linux app's panels.

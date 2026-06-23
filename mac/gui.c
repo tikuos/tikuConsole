@@ -5,12 +5,11 @@
  * like a terminal: a window-level key controller forwards keystrokes to the
  * board, an ANSI/SGR decoder colours the output, and the same wire is always
  * SLIP-demuxed so IP frames are separated from console text.  It wraps the
- * shared bridge core (bridge.c) -- the same SLIP/serial/utun primitives the
- * command-line slmux uses.
+ * shared bridge core (bridge.c).
  *
- * This is Phase 1 of the GUI: the console + connection are complete; the
- * networking side-panel (host utun bridge, in-app ping, NAT) and the firmware
- * build/flash bar are layered on next.
+ * This file owns the window, the console, the keyboard, the serial link and the
+ * port picker.  The networking side-panel (utun bridge, UDP relay, NAT) lives
+ * in gui_net.c and the in-app pinger in gui_ping.c -- all sharing one App.
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  * SPDX-License-Identifier: Apache-2.0
@@ -26,71 +25,16 @@
 #include <gtk/gtk.h>
 
 #include "bridge.h"
+#include "gui.h"
 #include "ports.h"
-
-#define VERSION  "0.01"
-#define GREEN    "#8ae234"
-#define BOARD_IP "172.16.7.2"
-
-/* ------------------------------------------------------------------------- */
-/* App state                                                                 */
-/* ------------------------------------------------------------------------- */
-
-typedef struct {
-    GtkApplication *app;
-    GtkWindow      *win;
-
-    /* serial link */
-    int    ser_fd;
-    guint  ser_watch;
-
-    /* networking (utun bridge lands with the side-panel phase) */
-    int    utun_fd;
-
-    /* port list */
-    port_info_t ports[PORTS_MAX];
-    int         n_ports;
-    char        port_path[256];
-
-    /* SLIP demux state */
-    gboolean    in_frame;
-    GByteArray *frame;
-
-    /* status lights */
-    gboolean slip_on, nat_on;
-
-    /* byte/frame counters */
-    unsigned fr_in, fr_out, by_in, by_out;
-
-    /* widgets */
-    GtkWidget     *port_dd;
-    GtkWidget     *platform_lbl;
-    GtkWidget     *baud;
-    GtkWidget     *net_sw;
-    GtkWidget     *connect_btn;
-    GtkWidget     *status;
-    GtkWidget     *usb_led, *slip_led, *nat_led;
-    GtkTextView   *cview;
-    GtkTextBuffer *cbuf;
-    GtkAdjustment *cadj;
-    gboolean       follow;
-
-    /* console ANSI/SGR decode state */
-    GString    *ansi_pending;   /* trailing partial escape carried to next read */
-    GString    *slip_scan;      /* rolling tail driving the SLIP light */
-    gboolean    sgr_bold, sgr_dim;
-    int         sgr_fg;         /* 0 = default, else 30..37 */
-    GtkTextTag *tag_fg[8];
-    GtkTextTag *tag_bold, *tag_dim;
-} App;
 
 static void teardown(App *app);
 
 /* ------------------------------------------------------------------------- */
-/* Small helpers                                                             */
+/* Small helpers (shared across modules -- see gui.h)                        */
 /* ------------------------------------------------------------------------- */
 
-static void ser_write(App *app, const char *buf, size_t len)
+void ser_write(App *app, const char *buf, size_t len)
 {
     if (app->ser_fd >= 0) {
         ssize_t r = write(app->ser_fd, buf, len);
@@ -98,13 +42,13 @@ static void ser_write(App *app, const char *buf, size_t len)
     }
 }
 
-static void send_line(App *app, const char *line)
+void send_line(App *app, const char *line)
 {
     ser_write(app, line, strlen(line));
     ser_write(app, "\r", 1);
 }
 
-static void set_status(App *app, const char *text, gboolean err)
+void set_status(App *app, const char *text, gboolean err)
 {
     char buf[600];
     if (err && strstr(text, "error") == NULL) {
@@ -123,7 +67,7 @@ static void set_led(GtkWidget *lbl, gboolean on, const char *text)
     gtk_label_set_markup(GTK_LABEL(lbl), m);
 }
 
-static void update_leds(App *app)
+void update_leds(App *app)
 {
     set_led(app->usb_led, app->ser_fd >= 0, "USB");
     set_led(app->slip_led, app->slip_on, "SLIP");
@@ -142,7 +86,6 @@ static void set_slip_led(App *app, gboolean on)
 /* Console: ANSI/SGR colour, BS/CR handling, auto-follow                     */
 /* ------------------------------------------------------------------------- */
 
-/* The board drives the SLIP light through its own console status lines. */
 static void led_scan(App *app, const char *text, int len)
 {
     g_string_append_len(app->slip_scan, text, len);
@@ -158,7 +101,6 @@ static void led_scan(App *app, const char *text, int len)
     }
 }
 
-/* Insert text with the currently active SGR tags applied. */
 static void console_raw_insert(App *app, const char *t, int len)
 {
     if (len <= 0) {
@@ -271,8 +213,11 @@ static int csi_end(const char *s, int from, int n)
     return -1;
 }
 
-static void console_append(App *app, const char *data, int len)
+void console_append(App *app, const char *data, int len)
 {
+    if (len < 0) {
+        len = (int)strlen(data);
+    }
     led_scan(app, data, len);
 
     GString *s = g_string_new_len(app->ansi_pending->str,
@@ -368,10 +313,9 @@ static gboolean on_key(GtkEventControllerKey *c, guint keyval, guint keycode,
     if (app->ser_fd < 0) {
         return FALSE;
     }
-    /* Let real text fields (baud) keep their keys. */
     GtkWidget *focus = gtk_window_get_focus(app->win);
     if (focus && GTK_IS_EDITABLE(focus)) {
-        return FALSE;
+        return FALSE;                   /* real text fields keep their keys */
     }
 
     gboolean ctrl = (state & GDK_CONTROL_MASK) != 0;
@@ -425,15 +369,6 @@ static gboolean on_key(GtkEventControllerKey *c, guint keyval, guint keycode,
 /* Serial I/O + SLIP demux                                                   */
 /* ------------------------------------------------------------------------- */
 
-static void on_ip_packet(App *app, const uint8_t *pkt, size_t len)
-{
-    app->fr_in++;
-    app->by_in += (unsigned)len;
-    if (app->utun_fd >= 0) {
-        utun_write(app->utun_fd, pkt, len);    /* host bridge (later phase) */
-    }
-}
-
 static gboolean on_serial_io(gint fd, GIOCondition cond, gpointer user)
 {
     (void)cond;
@@ -448,10 +383,6 @@ static gboolean on_serial_io(gint fd, GIOCondition cond, gpointer user)
         return G_SOURCE_REMOVE;
     }
 
-    /* Always demux SLIP: a frame is delimited by SLIP_END (0xC0), which the
-     * board's ASCII console output never contains, so console text falls
-     * straight through.  Console bytes are batched so console_append() sees
-     * whole runs (faster, and lets the SLIP-status detector match). */
     GString *text = g_string_new(NULL);
     for (ssize_t i = 0; i < nr; i++) {
         uint8_t b = buf[i];
@@ -465,7 +396,7 @@ static gboolean on_serial_io(gint fd, GIOCondition cond, gpointer user)
                     uint8_t ip[BRIDGE_MTU * 2];
                     size_t iplen = slip_unescape(app->frame->data,
                                                  app->frame->len, ip);
-                    on_ip_packet(app, ip, iplen);
+                    net_on_ip_packet(app, ip, iplen);
                 }
                 g_byte_array_set_size(app->frame, 0);
                 app->in_frame = FALSE;
@@ -522,6 +453,10 @@ static void do_connect(App *app)
         "[tikuconsole] connected (console mode) -- type away.\n";
     console_append(app, hello, (int)strlen(hello));
     gtk_widget_grab_focus(GTK_WIDGET(app->cview));
+
+    if (gtk_switch_get_active(GTK_SWITCH(app->net_sw))) {  /* net pre-selected */
+        net_apply(app, TRUE);
+    }
 }
 
 static void teardown(App *app)
@@ -530,6 +465,8 @@ static void teardown(App *app)
         g_source_remove(app->ser_watch);
         app->ser_watch = 0;
     }
+    net_down(app);
+    ping_cancel(app);
     if (app->ser_fd >= 0) {
         close(app->ser_fd);
         app->ser_fd = -1;
@@ -619,17 +556,15 @@ static gboolean on_net_toggle(GtkSwitch *sw, gboolean state, gpointer user)
 {
     (void)sw;
     App *app = user;
-    if (app->ser_fd < 0) {
-        set_status(app, "connect first, then enable Networking", FALSE);
-        return FALSE;                   /* let the switch reflect the choice */
+    if (app->ser_fd < 0) {              /* not connected: remember the choice */
+        gtk_widget_set_visible(app->netpanel, state);
+        if (state && geteuid() != 0) {
+            set_status(app, "Networking mode -- the host utun/NAT bridge needs "
+                            "sudo (SLIP + board ping work without it)", FALSE);
+        }
+        return FALSE;
     }
-    if (state) {
-        send_line(app, "slip");
-        set_status(app, "SLIP requested on the board -- the host bridge "
-                        "(ping/NAT panel) lands in the next phase.", FALSE);
-    } else {
-        send_line(app, "slip off");
-    }
+    net_apply(app, state);
     return FALSE;
 }
 
@@ -670,13 +605,6 @@ static void make_console_tags(App *app)
         "foreground", "#7f7f7f", NULL);
 }
 
-static GtkWidget *vsep(void)
-{
-    return gtk_separator_new(GTK_ORIENTATION_VERTICAL);
-}
-
-/* CI smoke test: TIKUCONSOLE_SMOKE_MS builds the window then quits, so the
- * whole activate path can be exercised headlessly. */
 static gboolean smoke_quit(gpointer user)
 {
     g_application_quit(G_APPLICATION(((App *)user)->app));
@@ -742,18 +670,18 @@ static void activate(GtkApplication *gapp, gpointer user)
     app->platform_lbl = gtk_label_new("--");
     gtk_widget_add_css_class(app->platform_lbl, "dim-label");
     gtk_box_append(GTK_BOX(bar), app->platform_lbl);
-    gtk_box_append(GTK_BOX(bar), vsep());
+    gtk_box_append(GTK_BOX(bar), gtk_separator_new(GTK_ORIENTATION_VERTICAL));
     gtk_box_append(GTK_BOX(bar), gtk_label_new("Baud"));
     app->baud = gtk_entry_new();
     gtk_editable_set_text(GTK_EDITABLE(app->baud), "115200");
     gtk_editable_set_max_width_chars(GTK_EDITABLE(app->baud), 7);
     gtk_box_append(GTK_BOX(bar), app->baud);
-    gtk_box_append(GTK_BOX(bar), vsep());
+    gtk_box_append(GTK_BOX(bar), gtk_separator_new(GTK_ORIENTATION_VERTICAL));
     gtk_box_append(GTK_BOX(bar), gtk_label_new("Networking"));
     app->net_sw = gtk_switch_new();
     gtk_widget_set_valign(app->net_sw, GTK_ALIGN_CENTER);
     gtk_widget_set_tooltip_text(app->net_sw,
-        "Toggle the board's SLIP/IP mode over the same wire");
+        "Bring up SLIP/IP + utun over the same wire (host bridge needs sudo)");
     g_signal_connect(app->net_sw, "state-set", G_CALLBACK(on_net_toggle), app);
     gtk_box_append(GTK_BOX(bar), app->net_sw);
     app->connect_btn = gtk_button_new_with_label("Connect");
@@ -772,9 +700,14 @@ static void activate(GtkApplication *gapp, gpointer user)
     gtk_label_set_wrap(GTK_LABEL(app->status), TRUE);
     gtk_box_append(GTK_BOX(root), app->status);
 
-    /* --- console --- */
+    /* --- main row: console | (optional) network panel, draggable divider --- */
+    app->paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_widget_set_vexpand(app->paned, TRUE);
+    gtk_paned_set_wide_handle(GTK_PANED(app->paned), TRUE);
+    gtk_box_append(GTK_BOX(root), app->paned);
+
     GtkWidget *sw = gtk_scrolled_window_new();
-    gtk_widget_set_vexpand(sw, TRUE);
+    gtk_widget_set_hexpand(sw, TRUE);
     app->cview = GTK_TEXT_VIEW(gtk_text_view_new());
     gtk_text_view_set_editable(app->cview, FALSE);
     gtk_text_view_set_monospace(app->cview, TRUE);
@@ -790,7 +723,16 @@ static void activate(GtkApplication *gapp, gpointer user)
                      G_CALLBACK(on_scroll_value), app);
     g_signal_connect(app->cadj, "changed",
                      G_CALLBACK(on_scroll_changed), app);
-    gtk_box_append(GTK_BOX(root), sw);
+    gtk_paned_set_start_child(GTK_PANED(app->paned), sw);
+    gtk_paned_set_resize_start_child(GTK_PANED(app->paned), TRUE);
+    gtk_paned_set_shrink_start_child(GTK_PANED(app->paned), FALSE);
+
+    app->netpanel = build_netpanel(app);
+    gtk_widget_set_visible(app->netpanel, FALSE);   /* shown only in net mode */
+    gtk_paned_set_end_child(GTK_PANED(app->paned), app->netpanel);
+    gtk_paned_set_resize_end_child(GTK_PANED(app->paned), FALSE);
+    gtk_paned_set_shrink_end_child(GTK_PANED(app->paned), FALSE);
+    gtk_paned_set_position(GTK_PANED(app->paned), 600);
 
     /* Type straight into the console from anywhere in the window. */
     GtkEventController *kc = gtk_event_controller_key_new();
@@ -798,12 +740,15 @@ static void activate(GtkApplication *gapp, gpointer user)
     g_signal_connect(kc, "key-pressed", G_CALLBACK(on_key), app);
     gtk_widget_add_controller(win, kc);
 
+    g_timeout_add(500, net_counters_tick, app);
     refresh_ports(app);
     update_leds(app);
     gtk_window_present(app->win);
 
     const char *smoke = g_getenv("TIKUCONSOLE_SMOKE_MS");
     if (smoke) {
+        gtk_widget_set_visible(app->netpanel, TRUE);  /* exercise the panel +
+                                                          its drawing areas */
         int ms = atoi(smoke);
         g_timeout_add(ms > 0 ? (guint)ms : 1, smoke_quit, app);
     }
@@ -819,6 +764,7 @@ int main(int argc, char **argv)
     app->ser_fd = -1;
     app->utun_fd = -1;
     app->follow = TRUE;
+    app->ping_ident = 0x4242;
     app->frame = g_byte_array_new();
     app->ansi_pending = g_string_new(NULL);
     app->slip_scan = g_string_new(NULL);
