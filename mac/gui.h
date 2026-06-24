@@ -135,7 +135,10 @@ typedef struct App {
     GtkWidget   *files_status;         /* action-bar status label */
     GtkWidget   *files_dl_btn;         /* Download (selection-gated) */
     GtkWidget   *files_del_btn;        /* Delete (selection-gated) */
-    char         files_xfer_name[128]; /* filename pending an async file dialog */
+    GtkWidget   *files_path_lbl;       /* header: the current /data path */
+    GtkWidget   *files_up_btn;         /* header: go to the parent folder */
+    char         files_cwd[256];       /* current sub-path under /data ("" = root) */
+    char         files_xfer_name[256]; /* child path pending an async file dialog */
 
     /* startup splash */
     GtkWidget   *splash, *splash_load, *splash_prog;

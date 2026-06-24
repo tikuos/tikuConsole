@@ -29,8 +29,10 @@ int  fs_shell(int fd, const char *line, char *out, size_t outsz);
 
 /* Convenience wrappers over fs_shell(). */
 int  fs_ls(int fd, char *out, size_t outsz);              /* "ls /data" */
+int  fs_ls_path(int fd, const char *abspath, char *out, size_t outsz);
 int  fs_df(int fd, char *out, size_t outsz);              /* "df"       */
 int  fs_rm(int fd, const char *name, char *out, size_t outsz);
+int  fs_mkdir(int fd, const char *name, char *out, size_t outsz);  /* /data/<name> */
 
 /* Parse `ls /data` text into filenames (the last token of each non-error
  * line).  Mutates ls_text in place; names[] point into it.  Returns count. */

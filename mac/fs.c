@@ -181,6 +181,20 @@ int fs_ls(int fd, char *out, size_t outsz)
     return fs_shell(fd, "ls /data", out, outsz);
 }
 
+int fs_ls_path(int fd, const char *abspath, char *out, size_t outsz)
+{
+    char line[300];
+    snprintf(line, sizeof(line), "ls %s", abspath);
+    return fs_shell(fd, line, out, outsz);
+}
+
+int fs_mkdir(int fd, const char *name, char *out, size_t outsz)
+{
+    char line[300];
+    snprintf(line, sizeof(line), "mkdir /data/%s", name);
+    return fs_shell(fd, line, out, outsz);
+}
+
 int fs_df(int fd, char *out, size_t outsz)
 {
     return fs_shell(fd, "df", out, outsz);
