@@ -131,8 +131,10 @@ typedef struct App {
     GtkWidget   *files_btn;
     GtkWidget   *files_win;
     GtkWidget   *files_list;           /* GtkListBox of filenames */
-    GtkWidget   *files_usage;          /* df summary label */
-    GtkWidget   *files_status;         /* last-op status label */
+    GtkWidget   *files_usage;          /* header-bar usage subtitle */
+    GtkWidget   *files_status;         /* action-bar status label */
+    GtkWidget   *files_dl_btn;         /* Download (selection-gated) */
+    GtkWidget   *files_del_btn;        /* Delete (selection-gated) */
     char         files_xfer_name[128]; /* filename pending an async file dialog */
 
     /* startup splash */
