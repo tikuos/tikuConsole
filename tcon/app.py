@@ -25,16 +25,19 @@ from tcon.leds import LedsMixin  # noqa: E402
 from tcon.splash import SplashMixin  # noqa: E402
 from tcon.ui import UiMixin  # noqa: E402
 from tcon.build import BuildMixin  # noqa: E402
+from tcon.files import FilesMixin  # noqa: E402
 
 
 class TikuConsole(ConsoleMixin, ConnectionMixin, PingMixin, NatMixin,
-                  LedsMixin, SplashMixin, UiMixin, BuildMixin, Gtk.Application):
+                  LedsMixin, SplashMixin, UiMixin, BuildMixin, FilesMixin,
+                  Gtk.Application):
     def __init__(self):
         super().__init__(application_id="org.tikuos.tikuconsole")
         self.ser = None
         self.tun = -1
         self.ser_src = 0
         self.tun_src = 0
+        self.files_win = None            # /data browser window (lazily built)
         self.net = False                 # networking mode active this session
         self.ports = []
         self.port_path = None
@@ -118,6 +121,12 @@ class TikuConsole(ConsoleMixin, ConnectionMixin, PingMixin, NatMixin,
         self.net_sw.set_tooltip_text("Bring up SLIP/IP + TUN over the same wire "
                                      "(needs sudo)")
         self.net_sw.connect("state-set", self.on_net_toggle); bar.append(self.net_sw)
+        bar.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
+        self.files_btn = Gtk.Button(label="Files…")
+        self.files_btn.set_tooltip_text("Browse and transfer files in the "
+                                        "device's /data store")
+        self.files_btn.connect("clicked", self.open_files_window)
+        bar.append(self.files_btn)
         self.connect_btn = Gtk.Button(label="Connect")
         self.connect_btn.add_css_class("suggested-action")
         self.connect_btn.connect("clicked", self.on_connect)

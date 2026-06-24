@@ -27,7 +27,9 @@ sudo python3 tikuconsole.py     # also enables the host TUN/NAT bridge
 
 1. Plug in a board — the port, platform and baud auto-fill. Click **Connect**.
 2. Type into the console.
-3. For networking, flip **Networking**: toggle SLIP on the board, **Ping** it,
+3. Click **Files…** to browse, upload, download and delete files in the board's
+   `/data` store (uses the device `send`/`recv` commands; binary-safe).
+4. For networking, flip **Networking**: toggle SLIP on the board, **Ping** it,
    and (as root) enable **NAT** to give the board internet.
 
 ### Options
