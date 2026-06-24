@@ -141,9 +141,30 @@ def parse_names(ls_text):
     return names
 
 
-def ls(ser):
-    """Raw `ls /data` reply text."""
-    return cmd(ser, "ls " + DATA)
+def ls(ser, path=DATA):
+    """Raw `ls <path>` reply text (defaults to /data)."""
+    return cmd(ser, "ls " + path)
+
+
+def list_entries(ser, path=DATA):
+    """Immediate children of `path` as [(name, is_dir)].  Folders come back from
+    the device with a trailing '/' (and an 'ls' dir flag); both are honoured."""
+    out = []
+    for ln in ls(ser, path).split("\n"):
+        s = ln.strip()
+        if not s or "cannot" in ln or s.startswith("ls:") or s.endswith(">"):
+            continue
+        parts = s.split(None, 1)                  # "rw name" / "d  name/"
+        if len(parts) == 2:
+            flag, name = parts
+            is_dir = flag.startswith("d") or name.endswith("/")
+        else:
+            name = parts[0]
+            is_dir = name.endswith("/")
+        name = name.rstrip("/")
+        if name:
+            out.append((name, is_dir))
+    return out
 
 
 def df(ser):
@@ -156,6 +177,20 @@ def rm(ser, name):
     body = cmd(ser, "rm %s/%s" % (DATA, name))
     if "cannot" in body.lower():
         raise FsError(body or ("cannot remove %s" % name))
+
+
+def mkdir(ser, name):
+    """Create the /data/<name> folder (path-as-name). Raises FsError."""
+    body = cmd(ser, "mkdir %s/%s" % (DATA, name))
+    if "cannot" in body.lower():
+        raise FsError(body)
+
+
+def rmdir(ser, name):
+    """Remove the empty /data/<name> folder marker. Raises FsError."""
+    body = cmd(ser, "rmdir %s/%s" % (DATA, name))
+    if "cannot" in body.lower():
+        raise FsError(body)
 
 
 def get(ser, name):
