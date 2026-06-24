@@ -481,6 +481,34 @@ static void teardown(App *app)
 }
 
 /* ------------------------------------------------------------------------- */
+/* File-op console guard                                                     */
+/*                                                                           */
+/* A /data transfer (gui_files.c) drives a synchronous request/response on   */
+/* the serial fd, so it must own the fd for its duration.  Pause the async   */
+/* console read-watch around the call and restore it after -- any bytes that */
+/* arrive meanwhile stay in the kernel buffer and drain when it resumes.     */
+/* ------------------------------------------------------------------------- */
+
+int files_pause_console(App *app)
+{
+    if (app->ser_fd < 0) {
+        return -1;
+    }
+    if (app->ser_watch) {
+        g_source_remove(app->ser_watch);
+        app->ser_watch = 0;
+    }
+    return app->ser_fd;
+}
+
+void files_resume_console(App *app)
+{
+    if (app->ser_fd >= 0 && app->ser_watch == 0) {
+        app->ser_watch = g_unix_fd_add(app->ser_fd, G_IO_IN, on_serial_io, app);
+    }
+}
+
+/* ------------------------------------------------------------------------- */
 /* Ports                                                                     */
 /* ------------------------------------------------------------------------- */
 
@@ -551,6 +579,12 @@ static void on_connect_clicked(GtkButton *b, gpointer user)
 {
     (void)b;
     do_connect((App *)user);
+}
+
+static void on_files_clicked(GtkButton *b, gpointer user)
+{
+    (void)b;
+    files_window_open((App *)user);
 }
 
 static gboolean on_net_toggle(GtkSwitch *sw, gboolean state, gpointer user)
@@ -729,6 +763,12 @@ static void activate(GtkApplication *gapp, gpointer user)
         "Bring up SLIP/IP + utun over the same wire (host bridge needs sudo)");
     g_signal_connect(app->net_sw, "state-set", G_CALLBACK(on_net_toggle), app);
     gtk_box_append(GTK_BOX(bar), app->net_sw);
+    gtk_box_append(GTK_BOX(bar), gtk_separator_new(GTK_ORIENTATION_VERTICAL));
+    app->files_btn = gtk_button_new_with_label("Files\xe2\x80\xa6");
+    gtk_widget_set_tooltip_text(app->files_btn,
+        "Browse and transfer files in the device's /data store");
+    g_signal_connect(app->files_btn, "clicked", G_CALLBACK(on_files_clicked), app);
+    gtk_box_append(GTK_BOX(bar), app->files_btn);
     app->connect_btn = gtk_button_new_with_label("Connect");
     gtk_widget_add_css_class(app->connect_btn, "suggested-action");
     gtk_widget_set_hexpand(app->connect_btn, TRUE);

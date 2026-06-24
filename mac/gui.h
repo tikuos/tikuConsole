@@ -127,6 +127,14 @@ typedef struct App {
     gboolean     bld_user_picked;      /* user chose an MCU -> stop auto-select */
     gboolean     bld_set_programmatic; /* guard: ignore our own radio toggles */
 
+    /* /data file browser window */
+    GtkWidget   *files_btn;
+    GtkWidget   *files_win;
+    GtkWidget   *files_list;           /* GtkListBox of filenames */
+    GtkWidget   *files_usage;          /* df summary label */
+    GtkWidget   *files_status;         /* last-op status label */
+    char         files_xfer_name[128]; /* filename pending an async file dialog */
+
     /* startup splash */
     GtkWidget   *splash, *splash_load, *splash_prog;
     int          splash_ticks;
@@ -157,6 +165,13 @@ void bld_debug_dump(App *app);            /* smoke: print proj_dir + flags */
 
 /* --- gui_splash.c --- */
 void show_splash(App *app);               /* presents the main window when done */
+
+/* --- gui.c (file-op console guard) --- */
+int  files_pause_console(App *app);       /* remove the read-watch; fd or -1 */
+void files_resume_console(App *app);      /* restore the read-watch */
+
+/* --- gui_files.c --- */
+void files_window_open(App *app);         /* open/raise the /data browser window */
 
 /* --- gui_ping.c --- */
 void ping_start(App *app, const char *target);

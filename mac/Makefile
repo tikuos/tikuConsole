@@ -20,15 +20,20 @@ all: slmux tikuconsole
 slmux: slmux.c bridge.c bridge.h
 	$(CC) $(CFLAGS) -o $@ slmux.c bridge.c
 
-GUI_SRC := gui.c gui_net.c gui_ping.c gui_build.c gui_splash.c \
-           bridge.c ports.c packets.c
-GUI_HDR := gui.h bridge.h ports.h packets.h
+GUI_SRC := gui.c gui_net.c gui_ping.c gui_build.c gui_splash.c gui_files.c \
+           bridge.c ports.c packets.c fs.c
+GUI_HDR := gui.h bridge.h ports.h packets.h fs.h
 
 tikuconsole: $(GUI_SRC) $(GUI_HDR)
 	$(CC) $(CFLAGS) $(GTK_CFLAGS) -o $@ $(GUI_SRC) \
 	    $(GTK_LIBS) $(FRAMEWORKS)
 
+# Headless self-test for the /data transfer protocol (no GTK needed):
+#   make fstest && ./fstest /dev/cu.usbmodemXXXX
+fstest: fs.c bridge.c fs.h bridge.h
+	$(CC) $(CFLAGS) -DFS_TEST -o $@ fs.c bridge.c $(FRAMEWORKS)
+
 clean:
-	rm -f slmux tikuconsole
+	rm -f slmux tikuconsole fstest
 
 .PHONY: all clean
