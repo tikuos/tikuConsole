@@ -26,11 +26,12 @@ from tcon.splash import SplashMixin  # noqa: E402
 from tcon.ui import UiMixin  # noqa: E402
 from tcon.build import BuildMixin  # noqa: E402
 from tcon.files import FilesMixin  # noqa: E402
+from tcon.wifi import WiFiMixin  # noqa: E402
 
 
 class TikuConsole(ConsoleMixin, ConnectionMixin, PingMixin, NatMixin,
                   LedsMixin, SplashMixin, UiMixin, BuildMixin, FilesMixin,
-                  Gtk.Application):
+                  WiFiMixin, Gtk.Application):
     def __init__(self):
         super().__init__(application_id="org.tikuos.tikuconsole")
         self.ser = None
@@ -60,6 +61,7 @@ class TikuConsole(ConsoleMixin, ConnectionMixin, PingMixin, NatMixin,
         self.ping_anim_pkts = []              # in-flight packet icons: progress 0..1
         self.ping_anim_src = 0
         self.ping_pulse = 0                   # board glyph glows briefly on reply
+        self._wifi_init()                     # WiFi scan/connect orchestration state
 
     # ---- UI ---------------------------------------------------------------
     def do_activate(self):

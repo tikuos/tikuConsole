@@ -73,7 +73,8 @@ class ConnectionMixin:
         TUN up (root) or not.  SLIP and the in-app board ping work over the bare
         serial without root; only the host TUN/NAT bridge needs it."""
         if not active:
-            self.netpanel.set_visible(False)
+            # keep the pane visible while connected -- WiFi lives here and needs
+            # no networking; only the SLIP/NAT/ping controls go dim below.
             self.net_hint.set_visible(False)
             self.ping_active = False               # cancel any in-flight ping
             self.send_line("slip off")             # console-only (idempotent)
@@ -132,6 +133,7 @@ class ConnectionMixin:
                          (self.port_path, self.baud.get_text()))
         GLib.idle_add(self._focus_console)         # grab focus after click settles
         self.append("[tikuconsole] connected (console mode) -- type away.\n")
+        self.netpanel.set_visible(True)            # WiFi panel needs no networking
         if self.net_sw.get_active():               # networking pre-selected
             self._apply_net(True)
 
@@ -192,6 +194,7 @@ class ConnectionMixin:
         self._update_leds()                        # USB/SLIP lights -> off
         self._set_status("disconnected")
         self.cview.add_css_class("console-off")     # grey it out: not enterable
+        self.netpanel.set_visible(False)            # hide the device pane
 
     def _on_serial(self, fd, cond, *a):
         try:
@@ -208,7 +211,8 @@ class ConnectionMixin:
         for b in data:
             if b == SLIP_END:
                 if text:
-                    self.append(text.decode("latin-1")); text = bytearray()
+                    s = text.decode("latin-1")
+                    self.append(s); self._wifi_feed(s); text = bytearray()
                 if self.in_frame:
                     if self.frame:
                         self._on_ip_packet(slip_unescape(self.frame))
@@ -220,7 +224,7 @@ class ConnectionMixin:
             else:
                 text.append(b)
         if text:
-            self.append(text.decode("latin-1"))
+            s = text.decode("latin-1"); self.append(s); self._wifi_feed(s)
         return GLib.SOURCE_CONTINUE
 
     def _on_ip_packet(self, pkt):
