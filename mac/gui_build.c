@@ -47,6 +47,7 @@ static const board_t BOARDS[] = {
     {"msp430fr6989", "msp430fr6989", "msp430", 9600,   "MSP430",       "FR6989"},
     {"apollo510",    "apollo510",    "ambiq",  115200, "Apollo",       "Apollo510"},
     {"apollo4l",     "apollo4l",     "ambiq",  115200, "Apollo",       "Apollo4 Lite"},
+    {"apollo4p",     "apollo4p",     "ambiq",  115200, "Apollo",       "Apollo4 Plus"},
     {"rp2350",       "rp2350",       "rp2350", 115200, "Raspberry Pi", "RP2350"},
 };
 #define N_BOARDS ((int)(sizeof(BOARDS) / sizeof(BOARDS[0])))
