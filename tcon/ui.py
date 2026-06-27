@@ -22,8 +22,8 @@ class UiMixin:
         nbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         nbox.set_size_request(340, -1)
 
-        # --- WiFi (RP2350W): scan + connect over the console, no SLIP/sudo ---
-        nbox.append(self._h("WiFi (RP2350W: scan + connect)"))
+        # --- WiFi (RP2350W): scan + connect + go online, over the console ---
+        nbox.append(self._h("WiFi (RP2350W: scan · connect · internet)"))
         wb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.wifi_scan_btn = Gtk.Button(label="Scan")
         self.wifi_scan_btn.connect("clicked", self.on_wifi_scan)
@@ -64,6 +64,41 @@ class UiMixin:
         self.wifi_conn_btn.connect("clicked", self.on_wifi_connect)
         cb.append(self.wifi_conn_btn)
         nbox.append(cb)
+
+        # --- On the network: DHCP lease + internet checks, all over WiFi ---
+        # Connect already joins AND brings the IP up; these let you re-run the
+        # DHCP, and ping / fetch time straight from the board over its radio.
+        self.wifi_ip_lbl = Gtk.Label(); self.wifi_ip_lbl.set_xalign(0)
+        self.wifi_ip_lbl.set_wrap(True); self.wifi_ip_lbl.set_selectable(True)
+        self.wifi_ip_lbl.set_markup(
+            "<span foreground='#888888'>not on the network — Connect joins "
+            "and brings the IP up</span>")
+        nbox.append(self.wifi_ip_lbl)
+        ab = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.wifi_up_btn = Gtk.Button(label="Go online")
+        self.wifi_up_btn.set_tooltip_text("Bring the board's IP stack up over "
+                                          "WiFi (runs 'wifi up' → DHCP)")
+        self.wifi_up_btn.connect("clicked", self.on_wifi_online)
+        ab.append(self.wifi_up_btn)
+        self.wifi_ping_btn = Gtk.Button(label="Ping")
+        self.wifi_ping_btn.set_tooltip_text("The board pings this host over its "
+                                            "own WiFi (default 8.8.8.8)")
+        self.wifi_ping_btn.connect("clicked", self.on_wifi_ping_net)
+        ab.append(self.wifi_ping_btn)
+        self.wifi_ping_t = Gtk.Entry(text="8.8.8.8")
+        self.wifi_ping_t.set_hexpand(True); self.wifi_ping_t.set_max_width_chars(14)
+        self.wifi_ping_t.connect("activate", self.on_wifi_ping_net)
+        ab.append(self.wifi_ping_t)
+        self.wifi_ntp_btn = Gtk.Button(label="Time")
+        self.wifi_ntp_btn.set_tooltip_text("Fetch UTC time from an internet NTP "
+                                           "server, over WiFi")
+        self.wifi_ntp_btn.connect("clicked", self.on_wifi_ntp)
+        ab.append(self.wifi_ntp_btn)
+        nbox.append(ab)
+        self.wifi_net_lbl = Gtk.Label(); self.wifi_net_lbl.set_xalign(0)
+        self.wifi_net_lbl.set_wrap(True); self.wifi_net_lbl.set_selectable(True)
+        nbox.append(self.wifi_net_lbl)
+
         nbox.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
         nbox.append(self._h("Networking (SLIP/IP over the wire)"))

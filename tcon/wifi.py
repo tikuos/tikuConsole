@@ -33,10 +33,16 @@ class WiFiMixin:
     def _wifi_init(self):
         """Called from TikuConsole.__init__ (state only; widgets live in ui.py)."""
         self._wifi_linebuf = ""
-        self._wifi_capture = None      # None | "list" | "status"
+        self._wifi_capture = None      # None|"list"|"status"|"ip"|"ping"|"ntp"
         self._wifi_aps = []
         self._wifi_status = {}
         self._wifi_poll = 0
+        # "On the network" state: DHCP lease + quick internet checks over WiFi.
+        self._wifi_ip = None           # last IPv4 read from the board's `ip`
+        self._wifi_ip_tries = 0
+        self._wifi_pingsum = None      # last board-side ping summary line
+        self._wifi_ntp = None          # last board-side ntp result line
+        self._wifi_auto_up = True      # a successful join also brings IP up
 
     # ---- incoming console line feed (tapped by ConnectionMixin._on_serial) ----
     def _wifi_feed(self, text):
@@ -59,6 +65,19 @@ class WiFiMixin:
             for key in ("State", "Link", "RSSI", "MAC"):
                 if line.startswith(key + ":"):
                     self._wifi_status[key.lower()] = line.split(":", 1)[1].strip()
+        elif self._wifi_capture == "ip":
+            # the board's `ip` prints "IPv4: 192.168.1.115"
+            if "IPv4:" in line:
+                self._wifi_ip = line.split("IPv4:", 1)[1].strip()
+        elif self._wifi_capture == "ping":
+            # summary line: "--- 8.8.8.8 ping: 4 sent, 4 received ---"
+            if "sent," in line and "received" in line:
+                self._wifi_pingsum = line.strip().strip("-").strip()
+        elif self._wifi_capture == "ntp":
+            # result: "ntp: 2026-06-26 19:57:34 UTC  stratum 1" (or an error)
+            s = line.strip()
+            if s.startswith("ntp:"):
+                self._wifi_ntp = s[4:].strip()
 
     # ---- Scan -------------------------------------------------------------
     def on_wifi_scan(self, _b=None):
@@ -149,6 +168,8 @@ class WiFiMixin:
         if link.startswith("joined"):
             self._wifi_say("✓ %s" % link, ok=True)
             self._wifi_poll = 99                        # stop the poll loop
+            if self._wifi_auto_up:                      # join → also go online
+                GLib.timeout_add(700, self.on_wifi_online)
         elif link.startswith("failed"):
             self._wifi_say("✗ join failed (%s)" % link, err=True)
             self._wifi_poll = 99
@@ -161,12 +182,113 @@ class WiFiMixin:
             return
         self.send_line("wifi disconnect")
         self._wifi_poll = 99
+        self._wifi_ip = None
+        self.wifi_ip_lbl.set_markup(
+            "<span foreground='#888888'>not on the network</span>")
         self._wifi_say("disconnect requested")
+
+    # ---- On the network: DHCP lease + ping + NTP over WiFi ----------------
+    def on_wifi_online(self, _b=None):
+        """Bring the board's IP stack up over the joined radio (`wifi up`) and
+        read back the DHCP lease.  Triggered by the Go-online button and
+        automatically after a successful join."""
+        if self.ser is None:
+            self._wifi_net_say("connect to a board first", err=True); return
+        self.wifi_up_btn.set_sensitive(False)
+        self._wifi_ip_tries = 0
+        self._wifi_net_say("bringing IP up over WiFi…")
+        self.send_line("wifi up")
+        GLib.timeout_add(1500, self._wifi_read_ip)      # let DHCP bind (~1.2s)
+
+    def _wifi_read_ip(self):
+        if self.ser is None:
+            self.wifi_up_btn.set_sensitive(True); return False
+        self._wifi_ip = None
+        self._wifi_linebuf = ""
+        self._wifi_capture = "ip"
+        self.send_line("ip")
+        GLib.timeout_add(700, self._wifi_apply_ip)
+        return False
+
+    def _wifi_apply_ip(self):
+        self._wifi_capture = None
+        self._wifi_ip_tries += 1
+        if self._wifi_ip and self._wifi_ip != "0.0.0.0":
+            self.wifi_ip_lbl.set_markup(
+                "<span foreground='%s'>● online  ·  IP %s</span>"
+                % (GREEN, GLib.markup_escape_text(self._wifi_ip)))
+            self._wifi_net_say("DHCP lease: %s" % self._wifi_ip, ok=True)
+            self.wifi_up_btn.set_sensitive(True)
+        elif self._wifi_ip_tries < 4:
+            GLib.timeout_add(1200, self._wifi_read_ip)  # poll until it binds
+        else:
+            self.wifi_ip_lbl.set_markup(
+                "<span foreground='#ff6b6b'>no lease — is the AP's DHCP up?"
+                "</span>")
+            self._wifi_net_say("no DHCP lease (retry Go online)", err=True)
+            self.wifi_up_btn.set_sensitive(True)
+        return False
+
+    def on_wifi_ping_net(self, _b=None):
+        """Have the board ping a host over its OWN WiFi (not the host TUN)."""
+        if self.ser is None:
+            self._wifi_net_say("connect to a board first", err=True); return
+        target = self.wifi_ping_t.get_text().strip() or "8.8.8.8"
+        self.wifi_ping_btn.set_sensitive(False)
+        self._wifi_pingsum = None
+        self._wifi_linebuf = ""
+        self._wifi_capture = "ping"
+        self.send_line("ping %s" % target)
+        self._wifi_net_say("pinging %s over WiFi…" % target)
+        GLib.timeout_add(7000, self._wifi_apply_ping)   # 4 pings ~5s + margin
+
+    def _wifi_apply_ping(self):
+        self._wifi_capture = None
+        self.wifi_ping_btn.set_sensitive(True)
+        s = self._wifi_pingsum
+        if s:
+            m = re.search(r"(\d+)\s+sent,\s+(\d+)\s+received", s)
+            ok = bool(m) and int(m.group(2)) > 0
+            self._wifi_net_say(("✓ " if ok else "✗ ") + s, ok=ok, err=not ok)
+        else:
+            self._wifi_net_say("ping: no reply (timed out)", err=True)
+        return False
+
+    def on_wifi_ntp(self, _b=None):
+        """Fetch UTC time from an internet NTP server, over WiFi."""
+        if self.ser is None:
+            self._wifi_net_say("connect to a board first", err=True); return
+        self.wifi_ntp_btn.set_sensitive(False)
+        self._wifi_ntp = None
+        self._wifi_linebuf = ""
+        self._wifi_capture = "ntp"
+        self.send_line("ntp")
+        self._wifi_net_say("fetching time over WiFi…")
+        GLib.timeout_add(9000, self._wifi_apply_ntp)    # dns+ntp up to ~8s
+
+    def _wifi_apply_ntp(self):
+        self._wifi_capture = None
+        self.wifi_ntp_btn.set_sensitive(True)
+        s = self._wifi_ntp
+        if s and ("UTC" in s or "stratum" in s):
+            self._wifi_net_say("🕒 %s" % s, ok=True)
+        elif s:
+            self._wifi_net_say("ntp: %s" % s, err=True)
+        else:
+            self._wifi_net_say("ntp: no reply (timed out)", err=True)
+        return False
 
     # ---- helpers ----------------------------------------------------------
     def _wifi_say(self, text, ok=False, err=False):
         colour = GREEN if ok else ("#ff6b6b" if err else "#888888")
         self.wifi_status_lbl.set_markup(
+            "<span foreground='%s'>%s</span>"
+            % (colour, GLib.markup_escape_text(text)))
+
+    def _wifi_net_say(self, text, ok=False, err=False):
+        """Status line for the 'On the network' (lease/ping/ntp) actions."""
+        colour = GREEN if ok else ("#ff6b6b" if err else "#888888")
+        self.wifi_net_lbl.set_markup(
             "<span foreground='%s'>%s</span>"
             % (colour, GLib.markup_escape_text(text)))
 
