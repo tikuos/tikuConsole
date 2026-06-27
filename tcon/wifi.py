@@ -43,6 +43,9 @@ class WiFiMixin:
         self._wifi_pingsum = None      # last board-side ping summary line
         self._wifi_ntp = None          # last board-side ntp result line
         self._wifi_auto_up = True      # a successful join also brings IP up
+        # Drives the main-row WiFi light + IP chip (see _wifi_update_led).
+        self._wifi_joined = False      # last known link state
+        self._wifi_ip_shown = None     # stable IP for the chip (not the parse buf)
 
     # ---- incoming console line feed (tapped by ConnectionMixin._on_serial) ----
     def _wifi_feed(self, text):
@@ -168,11 +171,16 @@ class WiFiMixin:
         if link.startswith("joined"):
             self._wifi_say("✓ %s" % link, ok=True)
             self._wifi_poll = 99                        # stop the poll loop
+            self._wifi_joined = True
+            self._wifi_update_led()
             if self._wifi_auto_up:                      # join → also go online
                 GLib.timeout_add(700, self.on_wifi_online)
         elif link.startswith("failed"):
             self._wifi_say("✗ join failed (%s)" % link, err=True)
             self._wifi_poll = 99
+            self._wifi_joined = False
+            self._wifi_ip_shown = None
+            self._wifi_update_led()
         elif link:
             self._wifi_say("%s…" % link)
         return False
@@ -183,9 +191,66 @@ class WiFiMixin:
         self.send_line("wifi disconnect")
         self._wifi_poll = 99
         self._wifi_ip = None
+        self._wifi_joined = False
+        self._wifi_ip_shown = None
+        self._wifi_update_led()
         self.wifi_ip_lbl.set_markup(
             "<span foreground='#888888'>not on the network</span>")
         self._wifi_say("disconnect requested")
+
+    def _wifi_update_led(self):
+        """Drive the main-row WiFi light + IP chip from the link/lease state:
+        green = joined and online (has a lease), amber = joined but no IP,
+        red = down.  The IP address rides next to the lights, not in the panel."""
+        if not hasattr(self, "wifi_led"):
+            return
+        joined = self._wifi_joined and self.ser is not None
+        ip = self._wifi_ip_shown if joined else None
+        if joined and ip:
+            colour = GREEN                              # online
+        elif joined:
+            colour = "#e6b800"                          # joined, no lease (amber)
+        else:
+            colour = "#ff6b6b"                          # down
+        self.wifi_led.set_markup("<span foreground='%s'>●</span> WiFi" % colour)
+        self.wifi_ip_chip.set_markup(
+            ("<span foreground='%s' size='small'>%s</span>" % (GREEN, ip))
+            if ip else "")
+
+    # ---- sync the lights to the board on connect --------------------------
+    def _wifi_sync(self):
+        """One-shot after connect: read the board's WiFi link (and IP if up) so
+        the main-row light + IP chip reflect reality -- the board may have
+        cold-boot auto-rejoined and already hold a lease.  Quiet: never writes
+        the panel's status labels, so it can't stomp a message the user sees."""
+        if self.ser is None or self._wifi_capture is not None:
+            return False                                # don't fight a live query
+        self._wifi_status = {}
+        self._wifi_linebuf = ""
+        self._wifi_capture = "status"
+        self.send_line("wifi status")
+        GLib.timeout_add(700, self._wifi_sync_apply)
+        return False
+
+    def _wifi_sync_apply(self):
+        self._wifi_capture = None
+        link = self._wifi_status.get("link", "")
+        self._wifi_joined = link.startswith("joined")
+        self._wifi_update_led()
+        if self._wifi_joined:                           # peek at the live IP
+            self._wifi_ip = None
+            self._wifi_linebuf = ""
+            self._wifi_capture = "ip"
+            self.send_line("ip")
+            GLib.timeout_add(700, self._wifi_sync_ip)
+        return False
+
+    def _wifi_sync_ip(self):
+        self._wifi_capture = None
+        if self._wifi_ip and self._wifi_ip != "0.0.0.0":
+            self._wifi_ip_shown = self._wifi_ip
+            self._wifi_update_led()
+        return False
 
     # ---- On the network: DHCP lease + ping + NTP over WiFi ----------------
     def on_wifi_online(self, _b=None):
@@ -214,14 +279,17 @@ class WiFiMixin:
         self._wifi_capture = None
         self._wifi_ip_tries += 1
         if self._wifi_ip and self._wifi_ip != "0.0.0.0":
+            self._wifi_ip_shown = self._wifi_ip         # IP rides by the lights
+            self._wifi_update_led()
             self.wifi_ip_lbl.set_markup(
-                "<span foreground='%s'>● online  ·  IP %s</span>"
-                % (GREEN, GLib.markup_escape_text(self._wifi_ip)))
+                "<span foreground='%s'>● online</span>" % GREEN)
             self._wifi_net_say("DHCP lease: %s" % self._wifi_ip, ok=True)
             self.wifi_up_btn.set_sensitive(True)
         elif self._wifi_ip_tries < 4:
             GLib.timeout_add(1200, self._wifi_read_ip)  # poll until it binds
         else:
+            self._wifi_ip_shown = None
+            self._wifi_update_led()
             self.wifi_ip_lbl.set_markup(
                 "<span foreground='#ff6b6b'>no lease — is the AP's DHCP up?"
                 "</span>")

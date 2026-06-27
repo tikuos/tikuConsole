@@ -134,6 +134,7 @@ class ConnectionMixin:
         GLib.idle_add(self._focus_console)         # grab focus after click settles
         self.append("[tikuconsole] connected (console mode) -- type away.\n")
         self.netpanel.set_visible(True)            # WiFi panel needs no networking
+        GLib.timeout_add(1500, self._wifi_sync)    # sync WiFi light/IP to the board
         if self.net_sw.get_active():               # networking pre-selected
             self._apply_net(True)
 

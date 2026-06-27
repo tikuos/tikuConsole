@@ -15,10 +15,12 @@ from tcon import GREEN
 
 class LedsMixin:
     def _update_leds(self):
-        """Refresh the main-window status lights: USB link, board SLIP, NAT."""
+        """Refresh the main-window status lights: USB, WiFi, board SLIP, NAT."""
         self.usb_led.set_markup(self._led(self.ser is not None, "USB"))
         self.slip_led.set_markup(self._led(self.slip_on, "SLIP"))
         self.nat_led.set_markup(self._led(self.nat_on, "Internet"))
+        if hasattr(self, "_wifi_update_led"):       # WiFi light + IP chip
+            self._wifi_update_led()
 
     @staticmethod
     def _led(on, text):

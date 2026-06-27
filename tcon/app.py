@@ -94,8 +94,11 @@ class TikuConsole(ConsoleMixin, ConnectionMixin, PingMixin, NatMixin,
         leds = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
         leds.set_valign(Gtk.Align.CENTER); leds.set_halign(Gtk.Align.END)
         self.usb_led = Gtk.Label(); self.slip_led = Gtk.Label()
-        self.nat_led = Gtk.Label()
-        for _l in (self.usb_led, self.slip_led, self.nat_led):
+        self.nat_led = Gtk.Label(); self.wifi_led = Gtk.Label()
+        # Board IP, shown right by the lights (not buried in the net panel).
+        self.wifi_ip_chip = Gtk.Label(); self.wifi_ip_chip.set_selectable(True)
+        for _l in (self.usb_led, self.wifi_led, self.wifi_ip_chip,
+                   self.slip_led, self.nat_led):
             leds.append(_l)
         brow.append(leds)
         root.append(brow)
