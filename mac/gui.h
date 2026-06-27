@@ -26,6 +26,17 @@
 
 #define PING_MAX 128            /* ping count is capped at 100 by the spinner */
 
+/* Wi-Fi reply-capture state (gui_wifi.c): which command's output we are
+ * currently slicing off the live console stream (WIFI_CAP_NONE = passthrough). */
+enum {
+    WIFI_CAP_NONE = 0,
+    WIFI_CAP_LIST,
+    WIFI_CAP_STATUS,
+    WIFI_CAP_IP,
+    WIFI_CAP_PING,
+    WIFI_CAP_NTP,
+};
+
 typedef struct App {
     GtkApplication *app;
     GtkWindow      *win;
@@ -110,6 +121,38 @@ typedef struct App {
     GtkTextBuffer *ping_buf;
     GtkTextTag    *ping_ok, *ping_bad;
 
+    /* widgets: Wi-Fi panel (RP2350W) -- ports tcon/wifi.py + tcon/ui.py block */
+    GtkWidget   *wifi_led;        /* lights-row dot: green/amber/red */
+    GtkWidget   *wifi_ip_chip;    /* lights-row IP chip next to the dot */
+    GtkWidget   *wifi_scan_btn;
+    GtkWidget   *wifi_status_lbl; /* scan-row status line (_wifi_say) */
+    GtkWidget   *wifi_list;       /* GtkListBox of scanned APs */
+    GtkWidget   *wifi_ssid;       /* GtkEntry */
+    GtkWidget   *wifi_pwd;        /* GtkPasswordEntry */
+    GtkWidget   *wifi_wpa3;       /* GtkCheckButton -> connect3 */
+    GtkWidget   *wifi_conn_btn;
+    GtkWidget   *wifi_disc_btn;
+    GtkWidget   *wifi_ip_lbl;     /* "on the network" readout */
+    GtkWidget   *wifi_up_btn;     /* Go online */
+    GtkWidget   *wifi_ping_btn;
+    GtkWidget   *wifi_ping_t;     /* GtkEntry, default 8.8.8.8 */
+    GtkWidget   *wifi_ntp_btn;    /* Time */
+    GtkWidget   *wifi_net_lbl;    /* on-the-network status (_wifi_net_say) */
+
+    /* Wi-Fi capture/orchestration state (ports _wifi_init) */
+    int          wifi_capture;    /* enum WIFI_CAP_* */
+    GString     *wifi_linebuf;    /* RX accumulator, sliced on '\n' */
+    GPtrArray   *wifi_aps;        /* of wifi_ap_t* (owned, g_free) */
+    char         wifi_link[64];   /* parsed `wifi status` Link: value */
+    int          wifi_poll;       /* status-poll counter (99 = stop) */
+    char         wifi_ip[40];     /* live `ip` parse buffer */
+    int          wifi_ip_tries;   /* DHCP-lease read retries */
+    char         wifi_pingsum[160];
+    char         wifi_ntp[160];
+    gboolean     wifi_joined;     /* last known radio link state (drives LED) */
+    char         wifi_ip_shown[40]; /* stable lease for the chip ("" = none) */
+    gboolean     wifi_auto_up;    /* a join auto-runs Go online (init TRUE) */
+
     /* firmware build/flash bar */
     gboolean     bld_running;
     int          bld_step;             /* 0 clean, 1 build, 2 flash */
@@ -158,6 +201,12 @@ void net_apply(App *app, gboolean active);
 void net_down(App *app);
 void net_on_ip_packet(App *app, const uint8_t *pkt, size_t len);
 gboolean net_counters_tick(gpointer user);
+
+/* --- gui_wifi.c --- */
+GtkWidget *build_wifi_panel(App *app);    /* the Wi-Fi section of the side panel */
+void wifi_feed(App *app, const char *text, int len);  /* console-stream tap */
+void wifi_update_led(App *app);           /* refresh the lights-row Wi-Fi dot */
+gboolean wifi_sync_cb(gpointer user);     /* post-connect quiet status sync */
 
 /* --- gui.c (for the build bar) --- */
 gboolean gui_autoconnect_step(App *app);  /* refresh + connect; TRUE if up */

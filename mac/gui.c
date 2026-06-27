@@ -72,6 +72,7 @@ void update_leds(App *app)
     set_led(app->usb_led, app->ser_fd >= 0, "USB");
     set_led(app->slip_led, app->slip_on, "SLIP");
     set_led(app->nat_led, app->nat_on, "Internet");
+    wifi_update_led(app);
 }
 
 static void set_slip_led(App *app, gboolean on)
@@ -389,6 +390,7 @@ static gboolean on_serial_io(gint fd, GIOCondition cond, gpointer user)
         if (b == SLIP_END) {
             if (text->len) {
                 console_append(app, text->str, (int)text->len);
+                wifi_feed(app, text->str, (int)text->len);
                 g_string_set_size(text, 0);
             }
             if (app->in_frame) {
@@ -412,6 +414,7 @@ static gboolean on_serial_io(gint fd, GIOCondition cond, gpointer user)
     }
     if (text->len) {
         console_append(app, text->str, (int)text->len);
+        wifi_feed(app, text->str, (int)text->len);
     }
     g_string_free(text, TRUE);
     return G_SOURCE_CONTINUE;
@@ -454,6 +457,11 @@ static void do_connect(App *app)
     console_append(app, hello, (int)strlen(hello));
     gtk_widget_grab_focus(GTK_WIDGET(app->cview));
 
+    /* show the side panel so the Wi-Fi controls are reachable, and run a quiet
+     * status sync in case the board auto-rejoined Wi-Fi on a cold boot. */
+    gtk_widget_set_visible(app->netpanel, TRUE);
+    g_timeout_add(1500, wifi_sync_cb, app);
+
     if (gtk_switch_get_active(GTK_SWITCH(app->net_sw))) {  /* net pre-selected */
         net_apply(app, TRUE);
     }
@@ -474,6 +482,11 @@ static void teardown(App *app)
     app->slip_on = FALSE;
     app->in_frame = FALSE;
     g_byte_array_set_size(app->frame, 0);
+    /* Wi-Fi: drop the link state + hide the side panel on disconnect */
+    app->wifi_joined = FALSE;
+    app->wifi_capture = WIFI_CAP_NONE;
+    app->wifi_ip_shown[0] = '\0';
+    gtk_widget_set_visible(app->netpanel, FALSE);
     gtk_button_set_label(GTK_BUTTON(app->connect_btn), "Connect");
     gtk_widget_add_css_class(GTK_WIDGET(app->cview), "console-off");
     update_leds(app);
@@ -723,9 +736,13 @@ static void activate(GtkApplication *gapp, gpointer user)
     gtk_widget_set_valign(leds, GTK_ALIGN_CENTER);
     gtk_widget_set_halign(leds, GTK_ALIGN_END);
     app->usb_led = gtk_label_new(NULL);
+    app->wifi_led = gtk_label_new(NULL);
+    app->wifi_ip_chip = gtk_label_new(NULL);
     app->slip_led = gtk_label_new(NULL);
     app->nat_led = gtk_label_new(NULL);
     gtk_box_append(GTK_BOX(leds), app->usb_led);
+    gtk_box_append(GTK_BOX(leds), app->wifi_led);
+    gtk_box_append(GTK_BOX(leds), app->wifi_ip_chip);
     gtk_box_append(GTK_BOX(leds), app->slip_led);
     gtk_box_append(GTK_BOX(leds), app->nat_led);
     gtk_box_append(GTK_BOX(brow), leds);
@@ -863,6 +880,9 @@ int main(int argc, char **argv)
     app->frame = g_byte_array_new();
     app->ansi_pending = g_string_new(NULL);
     app->slip_scan = g_string_new(NULL);
+    app->wifi_linebuf = g_string_new(NULL);
+    app->wifi_aps = g_ptr_array_new_with_free_func(g_free);
+    app->wifi_auto_up = TRUE;
 
     app->app = gtk_application_new("org.tikuos.tikuconsole",
                                    G_APPLICATION_DEFAULT_FLAGS);
@@ -873,6 +893,8 @@ int main(int argc, char **argv)
     g_byte_array_free(app->frame, TRUE);
     g_string_free(app->ansi_pending, TRUE);
     g_string_free(app->slip_scan, TRUE);
+    g_string_free(app->wifi_linebuf, TRUE);
+    g_ptr_array_free(app->wifi_aps, TRUE);
     g_free(app);
     return status;
 }

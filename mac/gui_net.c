@@ -426,7 +426,9 @@ static gboolean auto_slip_cb(gpointer user)
 void net_apply(App *app, gboolean active)
 {
     if (!active) {
-        gtk_widget_set_visible(app->netpanel, FALSE);
+        /* keep the side panel up while connected (the Wi-Fi controls live
+         * there); only hide it when there is no board attached. */
+        gtk_widget_set_visible(app->netpanel, app->ser_fd >= 0);
         gtk_widget_set_visible(app->net_hint, FALSE);
         ping_cancel(app);
         send_line(app, "slip off");          /* console-only (idempotent) */
@@ -557,6 +559,11 @@ GtkWidget *build_netpanel(App *app)
 {
     GtkWidget *nbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_widget_set_size_request(nbox, 340, -1);
+
+    /* Wi-Fi (RP2350W) rides above the SLIP/IP networking controls. */
+    gtk_box_append(GTK_BOX(nbox), build_wifi_panel(app));
+    gtk_box_append(GTK_BOX(nbox),
+                   gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
 
     gtk_box_append(GTK_BOX(nbox), section("Networking (SLIP/IP over the wire)"));
     app->net_hint = gtk_label_new(NULL);
