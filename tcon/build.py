@@ -77,19 +77,32 @@ class BuildMixin:
         frow.append(Gtk.Label(label="Build"))
         self.bld_shell = Gtk.CheckButton(label="shell")
         self.bld_net = Gtk.CheckButton(label="networking")
+        self.bld_wifi = Gtk.CheckButton(label="WiFi")
         self.bld_basic = Gtk.CheckButton(label="BASIC")
         self.bld_color = Gtk.CheckButton(label="colour")
+        self.bld_usb = Gtk.CheckButton(label="USB console")
         self.bld_shell.set_active(True)
         self.bld_net.set_active(True)
         self.bld_color.set_active(True)
+        self.bld_wifi.set_active(True)        # RP2350W default: WiFi-capable
+        self.bld_usb.set_active(True)         # RP2350 default: native USB CDC
         for w, tip in (
                 (self.bld_shell, "interactive shell (TIKU_SHELL_ENABLE=1)"),
                 (self.bld_net,   "SLIP/IP + telnet/CoAP/MQTT "
-                                 "(TIKU_SHELL_NET_TEST=1)"),
+                                 "(TIKU_SHELL_NET_TEST=1). RP2350: superseded by "
+                                 "WiFi — its autostarted servers starve the "
+                                 "cooperative USB console."),
+                (self.bld_wifi,  "RP2350W only: CYW43 WiFi + lean IP stack "
+                                 "(DHCP/DNS/NTP) for the WiFi panel. Drops the "
+                                 "heavy net servers so the USB console stays live."),
                 (self.bld_basic, "Tiku BASIC interpreter "
                                  "(TIKU_SHELL_BASIC_ENABLE=1)"),
                 (self.bld_color, "ANSI colour in the shell "
-                                 "(TIKU_SHELL_COLOR=1)")):
+                                 "(TIKU_SHELL_COLOR=1)"),
+                (self.bld_usb,   "RP2350 only: put the console on the native USB "
+                                 "CDC (TIKU_CONSOLE=usb) — the port this app "
+                                 "connects to. Uncheck only for an external "
+                                 "UART/FT232 rig.")):
             w.set_tooltip_text(tip)
             frow.append(w)
 
@@ -145,12 +158,38 @@ class BuildMixin:
             "TIKU_SHELL_COLOR=%d"        % (1 if self.bld_color.get_active()
                                             else 0),
         ]
-        if self.bld_net.get_active():
+        extra = []
+        is_rp = board.family == "rp2350"
+        wifi = is_rp and self.bld_wifi.get_active()
+        if wifi:
+            # The HW-verified lean WiFi profile: CYW43 driver + the net-min IP
+            # stack (ipv4/icmp/udp) + DHCP/DNS + the time kit for NTP, with the
+            # heavy autostarted servers (TCP/CoAP/MQTT/syslog/TFTP) dropped so
+            # the cooperative USB console stays responsive.  Deliberately NOT
+            # TIKU_SHELL_NET_TEST -- that combo starves the console on RP2350.
+            flags += [
+                "TIKU_DRV_WIFI_CYW43_ENABLE=1", "TIKU_KITS_NET_WIFI_ENABLE=1",
+                "TIKU_KIT_NET_ENABLE=1", "TIKU_KIT_NET_MIN=1",
+                "TIKU_KITS_NET_DHCP_ENABLE=1", "TIKU_KITS_NET_DNS_ENABLE=1",
+                "TIKU_KIT_TIME_ENABLE=1",
+            ]
+            extra += ["-DTIKU_KITS_NET_TCP_ENABLE=0", "-DTIKU_SHELL_CMD_SYSLOG=0",
+                      "-DTIKU_SHELL_CMD_MQTT=0", "-DTIKU_SHELL_CMD_COAP=0",
+                      "-DTIKU_SHELL_CMD_TFTP=0"]
+        elif self.bld_net.get_active():
             flags += ["TIKU_KIT_NET_ENABLE=1", "TIKU_SHELL_NET_TEST=1"]
         if self.bld_basic.get_active() and board.family == "msp430":
             flags.append("MEMORY_MODEL=large")      # BASIC needs it on MSP430
+        # RP2350 console rides the native USB CDC -- the port this app connects
+        # to.  Without it the Makefile defaults the console to the UART0 pins
+        # and NO USB serial device enumerates, so you can't connect.  Uncheck
+        # 'USB console' only for an external UART/FT232 rig.
+        if is_rp and self.bld_usb.get_active():
+            flags.append("TIKU_CONSOLE=usb")
         flags.append("MCU=%s" % board.mcu)
         flags.append("UART_BAUD=%d" % board.default_baud)
+        if extra:
+            flags.append("EXTRA_CFLAGS=%s" % " ".join(extra))
         return flags
 
     # ---- build + flash, streamed into the console -------------------------
@@ -165,12 +204,22 @@ class BuildMixin:
         board = _TB.resolve_board(self.bld_boards[idx])
         flags = self._bld_flags(board)
 
-        feats = [n for n, w in (("shell", self.bld_shell),
-                                ("net", self.bld_net),
-                                ("BASIC", self.bld_basic),
-                                ("colour", self.bld_color))
-                 if w.get_active()] or ["bare"]
-        profile = "+".join(feats)
+        is_rp = board.family == "rp2350"
+        wifi_on = is_rp and self.bld_wifi.get_active()
+        feats = []
+        if self.bld_shell.get_active():
+            feats.append("shell")
+        if wifi_on:
+            feats.append("wifi")                 # supersedes net on RP2350
+        elif self.bld_net.get_active():
+            feats.append("net")
+        if self.bld_basic.get_active():
+            feats.append("BASIC")
+        if self.bld_color.get_active():
+            feats.append("colour")
+        if is_rp and self.bld_usb.get_active():
+            feats.append("usb")
+        profile = "+".join(feats) or "bare"
 
         # Free the port: flashing drives the same USB debugger / back-channel
         # the console holds open (eZ-FET ACM, J-Link VCOM).  Reconnect after.
