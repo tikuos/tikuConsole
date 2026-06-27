@@ -237,19 +237,13 @@ class WiFiMixin:
         link = self._wifi_status.get("link", "")
         self._wifi_joined = link.startswith("joined")
         self._wifi_update_led()
-        if self._wifi_joined:                           # peek at the live IP
-            self._wifi_ip = None
-            self._wifi_linebuf = ""
-            self._wifi_capture = "ip"
-            self.send_line("ip")
-            GLib.timeout_add(700, self._wifi_sync_ip)
-        return False
-
-    def _wifi_sync_ip(self):
-        self._wifi_capture = None
-        if self._wifi_ip and self._wifi_ip != "0.0.0.0":
-            self._wifi_ip_shown = self._wifi_ip
-            self._wifi_update_led()
+        if self._wifi_joined:
+            # Joined (e.g. a cold-boot auto-rejoin) but "joined" is only the
+            # radio link -- there's no DHCP lease yet, so a raw `ping` would
+            # fall back to SLIP and time out.  Bring the IP up so the board is
+            # actually online; on_wifi_online() runs `wifi up` and fills the
+            # IP chip, turning the WiFi light green.
+            self.on_wifi_online()
         return False
 
     # ---- On the network: DHCP lease + ping + NTP over WiFi ----------------
