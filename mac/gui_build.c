@@ -150,18 +150,47 @@ static void bld_build_flags(App *app, const board_t *b)
     gboolean net   = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_net));
     gboolean basic = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_basic));
     gboolean color = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_color));
+    gboolean is_rp = (strcmp(b->family, "rp2350") == 0);
+    gboolean wifi  = is_rp &&
+                     gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_wifi));
+    gboolean usb   = is_rp &&
+                     gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_usb));
 
     BLD_ADD(app, "HAS_TESTS=0");
     BLD_ADD(app, "HAS_EXAMPLES=0");
     BLD_ADD(app, shell ? "TIKU_SHELL_ENABLE=1" : "TIKU_SHELL_ENABLE=0");
     BLD_ADD(app, basic ? "TIKU_SHELL_BASIC_ENABLE=1" : "TIKU_SHELL_BASIC_ENABLE=0");
     BLD_ADD(app, color ? "TIKU_SHELL_COLOR=1" : "TIKU_SHELL_COLOR=0");
-    if (net) {
+    if (wifi) {
+        /* RP2350W: the HW-verified lean WiFi profile -- CYW43 driver + the
+         * net-min IP stack (ipv4/icmp/udp) + DHCP/DNS + the time kit for NTP,
+         * with the heavy autostarted servers (TCP/CoAP/MQTT/syslog/TFTP) dropped
+         * via EXTRA_CFLAGS so the cooperative USB console stays responsive.
+         * Deliberately NOT TIKU_SHELL_NET_TEST -- that combo starves the console
+         * on RP2350.  Supersedes the 'networking' box. */
+        BLD_ADD(app, "TIKU_DRV_WIFI_CYW43_ENABLE=1");
+        BLD_ADD(app, "TIKU_KITS_NET_WIFI_ENABLE=1");
+        BLD_ADD(app, "TIKU_KIT_NET_ENABLE=1");
+        BLD_ADD(app, "TIKU_KIT_NET_MIN=1");
+        BLD_ADD(app, "TIKU_KITS_NET_DHCP_ENABLE=1");
+        BLD_ADD(app, "TIKU_KITS_NET_DNS_ENABLE=1");
+        BLD_ADD(app, "TIKU_KIT_TIME_ENABLE=1");
+        BLD_ADD(app, "EXTRA_CFLAGS=-DTIKU_KITS_NET_TCP_ENABLE=0 "
+                     "-DTIKU_SHELL_CMD_SYSLOG=0 -DTIKU_SHELL_CMD_MQTT=0 "
+                     "-DTIKU_SHELL_CMD_COAP=0 -DTIKU_SHELL_CMD_TFTP=0");
+    } else if (net) {
         BLD_ADD(app, "TIKU_KIT_NET_ENABLE=1");
         BLD_ADD(app, "TIKU_SHELL_NET_TEST=1");
     }
     if (basic && strcmp(b->family, "msp430") == 0) {
         BLD_ADD(app, "MEMORY_MODEL=large");   /* BASIC needs it on MSP430 */
+    }
+    /* RP2350 console rides the native USB CDC -- the port this app connects to.
+     * Without it the Makefile defaults the console to the UART0 pins and NO USB
+     * serial device enumerates, so you can't connect to what you just flashed.
+     * Uncheck 'USB console' only for an external UART/FT232 rig. */
+    if (usb) {
+        BLD_ADD(app, "TIKU_CONSOLE=usb");
     }
     char tmp[64];
     snprintf(tmp, sizeof(tmp), "MCU=%s", b->mcu);
@@ -170,16 +199,25 @@ static void bld_build_flags(App *app, const board_t *b)
     BLD_ADD(app, tmp);
 }
 
-static void bld_profile(App *app, char *out, size_t len)
+static void bld_profile(App *app, const board_t *b, char *out, size_t len)
 {
-    const struct { GtkWidget *w; const char *n; } F[] = {
-        {app->bld_shell, "shell"}, {app->bld_net, "net"},
-        {app->bld_basic, "BASIC"}, {app->bld_color, "colour"},
+    gboolean is_rp   = (strcmp(b->family, "rp2350") == 0);
+    gboolean wifi_on = is_rp &&
+        gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_wifi));
+    /* On RP2350 'wifi' supersedes 'net'; elsewhere the WiFi/USB boxes have no
+     * effect so they never appear in the profile label. */
+    const struct { gboolean on; const char *n; } F[] = {
+        { gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_shell)), "shell" },
+        { wifi_on,                                                       "wifi"  },
+        { !wifi_on &&
+          gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_net)),   "net"   },
+        { gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_basic)), "BASIC" },
+        { gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_color)), "colour"},
     };
     out[0] = '\0';
     int any = 0;
-    for (int i = 0; i < 4; i++) {
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(F[i].w))) {
+    for (int i = 0; i < (int)(sizeof(F) / sizeof(F[0])); i++) {
+        if (F[i].on) {
             if (any) {
                 g_strlcat(out, "+", len);
             }
@@ -362,7 +400,7 @@ static void on_build_flash(GtkButton *btn, gpointer user)
     const board_t *b = &BOARDS[idx];
     bld_build_flags(app, b);
     char profile[80];
-    bld_profile(app, profile, sizeof(profile));
+    bld_profile(app, b, profile, sizeof(profile));
 
     /* Flashing drives the same USB debugger the console holds open; free it. */
     gui_disconnect(app);
@@ -497,21 +535,34 @@ GtkWidget *build_buildbar(App *app)
     app->bld_net = gtk_check_button_new_with_label("networking");
     app->bld_basic = gtk_check_button_new_with_label("BASIC");
     app->bld_color = gtk_check_button_new_with_label("colour");
+    app->bld_wifi = gtk_check_button_new_with_label("WiFi");
+    app->bld_usb = gtk_check_button_new_with_label("USB console");
     gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_shell), TRUE);
     gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_net), TRUE);
     gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_color), TRUE);
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_wifi), TRUE); /* RP2350W default */
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_usb), TRUE);  /* RP2350 default: native USB CDC */
     gtk_widget_set_tooltip_text(app->bld_shell,
         "interactive shell (TIKU_SHELL_ENABLE=1)");
     gtk_widget_set_tooltip_text(app->bld_net,
-        "SLIP/IP + telnet/CoAP/MQTT (TIKU_SHELL_NET_TEST=1)");
+        "SLIP/IP + telnet/CoAP/MQTT (TIKU_SHELL_NET_TEST=1). RP2350: superseded "
+        "by WiFi -- its autostarted servers starve the cooperative USB console.");
     gtk_widget_set_tooltip_text(app->bld_basic,
         "Tiku BASIC interpreter (TIKU_SHELL_BASIC_ENABLE=1)");
     gtk_widget_set_tooltip_text(app->bld_color,
         "ANSI colour in the shell (TIKU_SHELL_COLOR=1)");
+    gtk_widget_set_tooltip_text(app->bld_wifi,
+        "RP2350W only: CYW43 WiFi + lean IP stack (DHCP/DNS/NTP) for the WiFi "
+        "panel. Drops the heavy net servers so the USB console stays live.");
+    gtk_widget_set_tooltip_text(app->bld_usb,
+        "RP2350 only: put the console on the native USB CDC (TIKU_CONSOLE=usb) -- "
+        "the port this app connects to. Uncheck only for an external UART/FT232 rig.");
     gtk_box_append(GTK_BOX(frow), app->bld_shell);
     gtk_box_append(GTK_BOX(frow), app->bld_net);
     gtk_box_append(GTK_BOX(frow), app->bld_basic);
     gtk_box_append(GTK_BOX(frow), app->bld_color);
+    gtk_box_append(GTK_BOX(frow), app->bld_wifi);
+    gtk_box_append(GTK_BOX(frow), app->bld_usb);
 
     app->bld_btn = gtk_button_new_with_label("Build & Flash");
     gtk_widget_add_css_class(app->bld_btn, "suggested-action");

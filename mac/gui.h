@@ -118,7 +118,7 @@ typedef struct App {
     int          bld_nradios;
     GtkWidget   *bld_radios[8];        /* one MCU radio per board */
     GtkWidget   *bld_btn;
-    GtkWidget   *bld_shell, *bld_net, *bld_basic, *bld_color;
+    GtkWidget   *bld_shell, *bld_net, *bld_basic, *bld_color, *bld_wifi, *bld_usb;
     GSubprocess *bld_proc;
     char         proj_dir[1024];       /* the tikuOS root (where make runs) */
     char         bld_board_key[32];
