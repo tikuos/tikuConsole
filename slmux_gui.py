@@ -33,6 +33,25 @@ TUNSETIFF = 0x400454CA
 IFF_TUN, IFF_NO_PI = 0x0001, 0x1000
 
 
+class BaudPicker(Gtk.DropDown):
+    """Dropdown of common baud rates with a Gtk.Entry-style get_text/set_text."""
+    RATES = ["9600", "19200", "38400", "57600",
+             "115200", "230400", "460800", "921600"]
+
+    def __init__(self, default="115200"):
+        super().__init__(model=Gtk.StringList.new(self.RATES))
+        self.set_text(str(default))
+
+    def get_text(self):
+        i = self.get_selected()
+        return self.RATES[i] if 0 <= i < len(self.RATES) else "115200"
+
+    def set_text(self, s):
+        s = str(s).strip()
+        self.set_selected(self.RATES.index(s) if s in self.RATES
+                          else self.RATES.index("115200"))
+
+
 class SlmuxGui(Gtk.Application):
     def __init__(self):
         super().__init__(application_id="org.tikuos.slmux")
@@ -67,7 +86,7 @@ class SlmuxGui(Gtk.Application):
         bar.append(Gtk.Label(label="Port"))
         self.port = Gtk.Entry(text="/dev/ttyACM0"); bar.append(self.port)
         bar.append(Gtk.Label(label="Baud"))
-        self.baud = Gtk.Entry(text="115200"); self.baud.set_max_width_chars(7)
+        self.baud = BaudPicker()
         bar.append(self.baud)
         self.connect_btn = Gtk.Button(label="Connect")
         self.connect_btn.connect("clicked", self.on_connect); bar.append(self.connect_btn)

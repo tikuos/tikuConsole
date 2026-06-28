@@ -187,7 +187,15 @@ class BuildMixin:
         if is_rp and self.bld_usb.get_active():
             flags.append("TIKU_CONSOLE=usb")
         flags.append("MCU=%s" % board.mcu)
-        flags.append("UART_BAUD=%d" % board.default_baud)
+        # Flash the board at the baud selected in the toolbar, not the board
+        # default -- otherwise raising the baud (e.g. 460800) speeds up the
+        # console/gateway side while the board stays at 115200 and the link is
+        # garbage. Fall back to the default if the field is non-numeric.
+        try:
+            _ubaud = int(str(self.baud.get_text()).strip())
+        except (ValueError, AttributeError, TypeError):
+            _ubaud = board.default_baud
+        flags.append("UART_BAUD=%d" % _ubaud)
         if extra:
             flags.append("EXTRA_CFLAGS=%s" % " ".join(extra))
         return flags

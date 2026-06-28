@@ -29,6 +29,26 @@ from tcon.files import FilesMixin  # noqa: E402
 from tcon.wifi import WiFiMixin  # noqa: E402
 
 
+class BaudPicker(Gtk.DropDown):
+    """Dropdown of common baud rates exposing the same get_text()/set_text()
+    API as the Gtk.Entry it replaces, so existing call sites are unchanged."""
+    RATES = ["9600", "19200", "38400", "57600",
+             "115200", "230400", "460800", "921600"]
+
+    def __init__(self, default="115200"):
+        super().__init__(model=Gtk.StringList.new(self.RATES))
+        self.set_text(str(default))
+
+    def get_text(self):
+        i = self.get_selected()
+        return self.RATES[i] if 0 <= i < len(self.RATES) else "115200"
+
+    def set_text(self, s):
+        s = str(s).strip()
+        self.set_selected(self.RATES.index(s) if s in self.RATES
+                          else self.RATES.index("115200"))
+
+
 class TikuConsole(ConsoleMixin, ConnectionMixin, PingMixin, NatMixin,
                   LedsMixin, SplashMixin, UiMixin, BuildMixin, FilesMixin,
                   WiFiMixin, Gtk.Application):
@@ -118,7 +138,7 @@ class TikuConsole(ConsoleMixin, ConnectionMixin, PingMixin, NatMixin,
         self.platform_lbl.add_css_class("dim-label"); bar.append(self.platform_lbl)
         bar.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
         bar.append(Gtk.Label(label="Baud"))
-        self.baud = Gtk.Entry(text="115200"); self.baud.set_max_width_chars(7)
+        self.baud = BaudPicker()
         bar.append(self.baud)
         bar.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
         bar.append(Gtk.Label(label="Networking"))
