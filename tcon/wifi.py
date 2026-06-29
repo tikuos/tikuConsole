@@ -223,6 +223,8 @@ class WiFiMixin:
         the main-row light + IP chip reflect reality -- the board may have
         cold-boot auto-rejoined and already hold a lease.  Quiet: never writes
         the panel's status labels, so it can't stomp a message the user sees."""
+        if not getattr(self, "_wifi_board", False):
+            return False            # SLIP board (Apollo/MSP430): has no `wifi` cmd
         if self.ser is None or self._wifi_capture is not None:
             return False                                # don't fight a live query
         self._wifi_status = {}

@@ -81,6 +81,7 @@ class BuildMixin:
         self.bld_basic = Gtk.CheckButton(label="BASIC")
         self.bld_color = Gtk.CheckButton(label="colour")
         self.bld_usb = Gtk.CheckButton(label="USB console")
+        self.bld_web = Gtk.CheckButton(label="web (HTTPS)")
         self.bld_shell.set_active(True)
         self.bld_net.set_active(True)
         self.bld_color.set_active(True)
@@ -102,7 +103,11 @@ class BuildMixin:
                 (self.bld_usb,   "RP2350 only: put the console on the native USB "
                                  "CDC (TIKU_CONSOLE=usb) — the port this app "
                                  "connects to. Uncheck only for an external "
-                                 "UART/FT232 rig.")):
+                                 "UART/FT232 rig."),
+                (self.bld_web,   "HTTPS web stack: cert-TLS 1.3/1.2 + HTTP + DNS "
+                                 "+ time + crypto. Enables BASIC HTTPGET$ and "
+                                 "BROWSE (the text web browser); forces BASIC on. "
+                                 "Apollo / RP2350 only — heavy build.")):
             w.set_tooltip_text(tip)
             frow.append(w)
 
@@ -153,7 +158,8 @@ class BuildMixin:
             "HAS_TESTS=0", "HAS_EXAMPLES=0",
             "TIKU_SHELL_ENABLE=%d"       % (1 if self.bld_shell.get_active()
                                             else 0),
-            "TIKU_SHELL_BASIC_ENABLE=%d" % (1 if self.bld_basic.get_active()
+            "TIKU_SHELL_BASIC_ENABLE=%d" % (1 if (self.bld_basic.get_active() or
+                                                  self.bld_web.get_active())
                                             else 0),
             "TIKU_SHELL_COLOR=%d"        % (1 if self.bld_color.get_active()
                                             else 0),
@@ -161,7 +167,22 @@ class BuildMixin:
         extra = []
         is_rp = board.family == "rp2350"
         wifi = is_rp and self.bld_wifi.get_active()
-        if wifi:
+        if self.bld_web.get_active():
+            # HTTPS web profile: cert-TLS 1.3/1.2 + HTTP + DNS + time + crypto,
+            # so BASIC HTTPGET$ / BROWSE reach the real web. Lean net but TCP
+            # stays on (TLS needs it -- unlike the WiFi-panel profile, which
+            # drops TCP). On RP2350 it rides WiFi (if WiFi is checked); on
+            # Apollo it rides SLIP (the shell 'slip' command) over the wire.
+            flags += [
+                "TIKU_KIT_NET_ENABLE=1", "TIKU_KIT_NET_MIN=1",
+                "TIKU_KITS_NET_DNS_ENABLE=1", "TIKU_KITS_NET_HTTP_ENABLE=1",
+                "TIKU_KIT_CRYPTO_ENABLE=1", "HAS_TLS=1", "TIKU_KIT_TIME_ENABLE=1",
+            ]
+            if wifi:
+                flags += ["TIKU_DRV_WIFI_CYW43_ENABLE=1",
+                          "TIKU_KITS_NET_WIFI_ENABLE=1",
+                          "TIKU_KITS_NET_DHCP_ENABLE=1"]
+        elif wifi:
             # The HW-verified lean WiFi profile: CYW43 driver + the net-min IP
             # stack (ipv4/icmp/udp) + DHCP/DNS + the time kit for NTP, with the
             # heavy autostarted servers (TCP/CoAP/MQTT/syslog/TFTP) dropped so

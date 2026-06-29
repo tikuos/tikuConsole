@@ -21,9 +21,10 @@ class UiMixin:
     def _build_netpanel(self):
         nbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         nbox.set_size_request(340, -1)
+        self.wifi_pane = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
 
         # --- WiFi (RP2350W): scan + connect + go online, over the console ---
-        nbox.append(self._h("WiFi (RP2350W: scan · connect · internet)"))
+        self.wifi_pane.append(self._h("WiFi (RP2350W: scan · connect · internet)"))
         wb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.wifi_scan_btn = Gtk.Button(label="Scan")
         self.wifi_scan_btn.connect("clicked", self.on_wifi_scan)
@@ -32,25 +33,25 @@ class UiMixin:
         self.wifi_status_lbl.set_hexpand(True); self.wifi_status_lbl.set_wrap(True)
         self.wifi_status_lbl.set_markup("<span foreground='#888888'>idle</span>")
         wb.append(self.wifi_status_lbl)
-        nbox.append(wb)
+        self.wifi_pane.append(wb)
         wsw = Gtk.ScrolledWindow()
         wsw.set_min_content_height(110); wsw.set_max_content_height(170)
         wsw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.wifi_list = Gtk.ListBox(); self.wifi_list.set_show_separators(True)
         self.wifi_list.connect("row-selected", self.on_wifi_row)
         self.wifi_list.add_css_class("console")
-        wsw.set_child(self.wifi_list); nbox.append(wsw)
+        wsw.set_child(self.wifi_list); self.wifi_pane.append(wsw)
         se = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         se.append(Gtk.Label(label="SSID"))
         self.wifi_ssid = Gtk.Entry(); self.wifi_ssid.set_hexpand(True)
         self.wifi_ssid.connect("activate", self.on_wifi_connect); se.append(self.wifi_ssid)
-        nbox.append(se)
+        self.wifi_pane.append(se)
         pe = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         pe.append(Gtk.Label(label="Pass"))
         self.wifi_pwd = Gtk.PasswordEntry(); self.wifi_pwd.set_show_peek_icon(True)
         self.wifi_pwd.set_hexpand(True)
         self.wifi_pwd.connect("activate", self.on_wifi_connect); pe.append(self.wifi_pwd)
-        nbox.append(pe)
+        self.wifi_pane.append(pe)
         cb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.wifi_wpa3 = Gtk.CheckButton(label="WPA3")
         self.wifi_wpa3.set_tooltip_text("Use WPA3-SAE (connect3) instead of WPA2-PSK")
@@ -63,7 +64,7 @@ class UiMixin:
         self.wifi_conn_btn.set_hexpand(True); self.wifi_conn_btn.set_halign(Gtk.Align.END)
         self.wifi_conn_btn.connect("clicked", self.on_wifi_connect)
         cb.append(self.wifi_conn_btn)
-        nbox.append(cb)
+        self.wifi_pane.append(cb)
 
         # --- On the network: DHCP lease + internet checks, all over WiFi ---
         # Connect already joins AND brings the IP up; these let you re-run the
@@ -73,7 +74,7 @@ class UiMixin:
         self.wifi_ip_lbl.set_markup(
             "<span foreground='#888888'>not on the network — Connect joins "
             "and brings the IP up</span>")
-        nbox.append(self.wifi_ip_lbl)
+        self.wifi_pane.append(self.wifi_ip_lbl)
         ab = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.wifi_up_btn = Gtk.Button(label="Go online")
         self.wifi_up_btn.set_tooltip_text("Bring the board's IP stack up over "
@@ -94,10 +95,12 @@ class UiMixin:
                                            "server, over WiFi")
         self.wifi_ntp_btn.connect("clicked", self.on_wifi_ntp)
         ab.append(self.wifi_ntp_btn)
-        nbox.append(ab)
+        self.wifi_pane.append(ab)
         self.wifi_net_lbl = Gtk.Label(); self.wifi_net_lbl.set_xalign(0)
         self.wifi_net_lbl.set_wrap(True); self.wifi_net_lbl.set_selectable(True)
-        nbox.append(self.wifi_net_lbl)
+        self.wifi_pane.append(self.wifi_net_lbl)
+        nbox.append(self.wifi_pane)
+        self.wifi_pane.set_visible(False)   # hidden until a RP2350 port is identified
 
         nbox.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
@@ -113,6 +116,20 @@ class UiMixin:
         nbox.append(self.tun_lbl)
         self.cnt_lbl = Gtk.Label(label="frames in/out: 0/0   bytes: 0/0")
         self.cnt_lbl.set_xalign(0); nbox.append(self.cnt_lbl)
+        # SLIP activity LEDs -- the arrows pulse + glow as frames cross the wire
+        # (cyan = host->board, green = board->host); driven by the gateway via
+        # _slip_blink() at the serial<->tun forwarding points.  Watch them
+        # shimmer during a BASIC BROWSE / HTTPGET$.
+        sa = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        sa.append(Gtk.Label(label="SLIP"))
+        self.slip_tx_lbl = Gtk.Label(label="▲ to board")
+        self.slip_tx_lbl.add_css_class("slip-led")
+        self.slip_tx_lbl.set_tooltip_text("host → board: a SLIP frame was sent")
+        self.slip_rx_lbl = Gtk.Label(label="▼ from board")
+        self.slip_rx_lbl.add_css_class("slip-led")
+        self.slip_rx_lbl.set_tooltip_text("board → host: a SLIP frame arrived")
+        sa.append(self.slip_tx_lbl); sa.append(self.slip_rx_lbl)
+        nbox.append(sa)
 
         nbox.append(self._h("Internet (NAT: board → internet)"))
         natb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -155,6 +172,16 @@ class UiMixin:
         self.ping_bad = self.ping_buf.create_tag("bad", foreground="#ff6b6b")
         psw.set_child(self.ping_view); nbox.append(psw)
         return nbox
+
+    def set_wifi_pane_visible(self, plat):
+        """Show the WiFi pane only for RP2350-class boards (the only ones with
+        onboard WiFi); Apollo/MSP430 use SLIP, so hide it there.  Also records
+        self._wifi_board so the on-connect `wifi status` auto-probe (_wifi_sync)
+        stays silent on boards that have no `wifi` command."""
+        p = (plat or "").lower()
+        self._wifi_board = ("rp2" in p or "pico" in p)
+        if hasattr(self, "wifi_pane"):
+            self.wifi_pane.set_visible(self._wifi_board)
 
     def _h(self, text):
         lbl = Gtk.Label(label=text); lbl.set_xalign(0)

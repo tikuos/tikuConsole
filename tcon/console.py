@@ -101,7 +101,13 @@ class ConsoleMixin:
                 ".splash progressbar > trough,"
                 " .splash progressbar > trough > progress { min-height:9px; }"
                 ".splash progressbar > trough > progress { background-image:"
-                " linear-gradient(90deg,#1f6fc4,#2e9e54,#f0a91e); }")
+                " linear-gradient(90deg,#1f6fc4,#2e9e54,#f0a91e); }"
+                # SLIP activity LEDs: idle grey; on a frame they snap bright +
+                # glow, then the CSS transition fades them back when traffic stops
+                ".slip-led { color:#555; font-weight:bold;"
+                " transition:color 500ms ease-out, text-shadow 500ms ease-out; }"
+                ".slip-led.tx-on { color:#36c5f0; text-shadow:0 0 8px #36c5f0; }"
+                ".slip-led.rx-on { color:#5fd35f; text-shadow:0 0 8px #5fd35f; }")
         try:
             css.load_from_string(data)
         except Exception:

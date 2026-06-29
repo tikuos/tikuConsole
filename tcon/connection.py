@@ -47,11 +47,13 @@ class ConnectionMixin:
             plat, baud = identify_port(p)
             self.port_path = p.device
             self.platform_lbl.set_text(plat)
+            self.set_wifi_pane_visible(plat)
             if self.ser is None:                   # don't fight a live session
                 self.baud.set_text(str(baud))
         else:
             self.port_path = None
             self.platform_lbl.set_text("--")
+            self.set_wifi_pane_visible("")
 
     # ---- networking apply (shared by the switch + connect) ----------------
     def on_net_toggle(self, _sw, active):
@@ -231,6 +233,7 @@ class ConnectionMixin:
     def _on_ip_packet(self, pkt):
         """A full SLIP-decoded IP packet from the board."""
         self.fr_in += 1; self.by_in += len(pkt)
+        self._slip_blink("rx")
         if self.tun >= 0:
             os.write(self.tun, pkt)                 # root path: kernel routes it
         else:
@@ -250,7 +253,32 @@ class ConnectionMixin:
             pkt = self._dns_fit_packet(pkt)         # shrink oversize DNS replies
             self.ser.write(slip_encode(pkt))
             self.fr_out += 1; self.by_out += len(pkt)
+            self._slip_blink("tx")
         return GLib.SOURCE_CONTINUE
+
+    # ---- SLIP activity LEDs -----------------------------------------------
+    def _slip_blink(self, d):
+        """Pulse a SLIP TX/RX LED for one frame.  The arrow snaps bright + glows;
+        140 ms after the last frame of a burst it is released and the CSS
+        transition fades it back -- so a BROWSE / HTTPGET$ makes the arrows
+        shimmer for the whole exchange.  d is "tx" (host->board) or "rx"."""
+        if not hasattr(self, "slip_tx_lbl"):
+            return                                  # netpanel not built yet
+        lbl = self.slip_tx_lbl if d == "tx" else self.slip_rx_lbl
+        cls = "tx-on" if d == "tx" else "rx-on"
+        if not lbl.has_css_class(cls):
+            lbl.add_css_class(cls)
+        attr = "_slip_%s_src" % d
+        src = getattr(self, attr, 0)
+        if src:
+            GLib.source_remove(src)                 # extend the glow during a burst
+        setattr(self, attr, GLib.timeout_add(140, self._slip_off, d))
+
+    def _slip_off(self, d):
+        lbl = self.slip_tx_lbl if d == "tx" else self.slip_rx_lbl
+        lbl.remove_css_class("tx-on" if d == "tx" else "rx-on")
+        setattr(self, "_slip_%s_src" % d, 0)
+        return False
 
     # ---- actions / host-system helpers ------------------------------------
     def send_line(self, line):
