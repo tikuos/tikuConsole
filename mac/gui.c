@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <mach-o/dyld.h>          /* _NSGetExecutablePath (window-icon path) */
 
 #include <glib-unix.h>
 #include <gtk/gtk.h>
@@ -482,7 +483,11 @@ static gboolean on_serial_io(gint fd, GIOCondition cond, gpointer user)
                 g_byte_array_set_size(app->frame, 0);
             }
         } else if (app->in_frame) {
-            g_byte_array_append(app->frame, &b, 1);
+            /* cap the frame at the decode buffer so a garbled/hostile stream
+             * can't grow it unbounded or overflow ip[BRIDGE_MTU*2] above */
+            if (app->frame->len < (guint)(BRIDGE_MTU * 2)) {
+                g_byte_array_append(app->frame, &b, 1);
+            }
         } else {
             g_string_append_c(text, (char)b);
         }
@@ -725,6 +730,31 @@ gboolean gui_autoconnect_step(App *app)
 /* Window assembly                                                           */
 /* ------------------------------------------------------------------------- */
 
+/* Register the bundled logo dir as an icon search path + name the window icon,
+ * mirroring tcon/app.py. macOS shows no titlebar icon for a non-bundled GTK
+ * app, so this is largely a no-op here, but it is correct and works if bundled. */
+static void install_window_icon(GtkWindow *win)
+{
+    char exe[2048];
+    uint32_t sz = sizeof(exe);
+    if (_NSGetExecutablePath(exe, &sz) != 0) {
+        return;
+    }
+    char *real = realpath(exe, NULL);
+    if (!real) {
+        return;
+    }
+    char *dir  = g_path_get_dirname(real);                  /* <tikuConsole>/mac */
+    char *logo = g_build_filename(dir, "..", "logo", NULL); /* <tikuConsole>/logo */
+    GtkIconTheme *theme =
+        gtk_icon_theme_get_for_display(gdk_display_get_default());
+    gtk_icon_theme_add_search_path(theme, logo);
+    gtk_window_set_icon_name(win, "org.tikuos.tikuconsole");
+    g_free(logo);
+    g_free(dir);
+    free(real);
+}
+
 static void install_css(void)
 {
     static const char *data =
@@ -789,6 +819,7 @@ static void activate(GtkApplication *gapp, gpointer user)
 
     GtkWidget *win = gtk_application_window_new(gapp);
     app->win = GTK_WINDOW(win);
+    install_window_icon(app->win);
     gtk_window_set_title(app->win, "TikuConsole");
     gtk_window_set_default_size(app->win, 960, 600);
     gtk_window_set_titlebar(app->win, gtk_header_bar_new());
@@ -820,6 +851,7 @@ static void activate(GtkApplication *gapp, gpointer user)
     app->usb_led = gtk_label_new(NULL);
     app->wifi_led = gtk_label_new(NULL);
     app->wifi_ip_chip = gtk_label_new(NULL);
+    gtk_label_set_selectable(GTK_LABEL(app->wifi_ip_chip), TRUE);
     app->slip_led = gtk_label_new(NULL);
     app->nat_led = gtk_label_new(NULL);
     gtk_box_append(GTK_BOX(leds), app->usb_led);
@@ -953,6 +985,20 @@ static void activate(GtkApplication *gapp, gpointer user)
 
 int main(int argc, char **argv)
 {
+    if (g_getenv("TIKUCONSOLE_SCAN")) {     /* headless port dump, no GTK/display */
+        port_info_t p[PORTS_MAX];
+        int n = ports_scan(p, PORTS_MAX);
+        if (n == 0) {
+            printf("no USB serial ports found\n");
+        }
+        for (int i = 0; i < n; i++) {
+            printf("%-18s %04x:%04x  %-24s baud=%u\n", p[i].device,
+                   p[i].vid < 0 ? 0u : (unsigned)p[i].vid,
+                   p[i].pid < 0 ? 0u : (unsigned)p[i].pid,
+                   p[i].label, p[i].baud);
+        }
+        return 0;
+    }
     App *app = g_new0(App, 1);
     app->ser_fd = -1;
     app->utun_fd = -1;
