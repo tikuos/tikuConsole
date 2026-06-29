@@ -210,7 +210,18 @@ int main(int argc, char **argv)
             if (n > 4) {
                 uint8_t out[(BRIDGE_MTU * 2) + 2];
                 size_t olen = slip_encode(buf + 4, (size_t)(n - 4), out);
-                (void)write(ser, out, olen);
+                /* drain fully: the non-blocking fd would otherwise drop the
+                 * tail of a burst (e.g. a TLS flight over SLIP), truncating
+                 * the frame -- the same bug fixed in gui.c ser_write() */
+                size_t off = 0;
+                int spins = 0;
+                while (off < olen && spins < 3000) {
+                    ssize_t w = write(ser, out + off, olen - off);
+                    if (w > 0)      { off += (size_t)w; spins = 0; }
+                    else if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                        usleep(1000); spins++;
+                    } else break;
+                }
             }
         }
 

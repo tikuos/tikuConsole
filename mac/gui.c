@@ -37,9 +37,31 @@ static void teardown(App *app);
 
 void ser_write(App *app, const char *buf, size_t len)
 {
-    if (app->ser_fd >= 0) {
-        ssize_t r = write(app->ser_fd, buf, len);
-        (void)r;
+    if (app->ser_fd < 0) {
+        return;
+    }
+    /* The serial fd is non-blocking (bridge.c), so a single write() can
+     * short-count or return EAGAIN when the USB-serial TX buffer fills during a
+     * burst -- e.g. a multi-segment TLS flight forwarded over SLIP. The old code
+     * dropped the unwritten tail, truncating SLIP frames mid-flight (corrupt TLS
+     * records / stalled handshakes). Drain the whole buffer like the file-xfer
+     * path (fs.c) does, honouring EAGAIN, with a no-progress deadline so a
+     * stalled board can't wedge the UI. (pyserial's blocking write does this.) */
+    size_t off = 0;
+    gint64 t0 = g_get_monotonic_time();
+    while (off < len) {
+        ssize_t w = write(app->ser_fd, buf + off, len - off);
+        if (w > 0) {
+            off += (size_t)w;
+            t0 = g_get_monotonic_time();          /* progress: reset stall clock */
+        } else if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (g_get_monotonic_time() - t0 > 2 * G_USEC_PER_SEC) {
+                break;                            /* no drain for 2s: give up */
+            }
+            usleep(1000);
+        } else {
+            break;                                /* hard error (e.g. unplugged) */
+        }
     }
 }
 
