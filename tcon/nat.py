@@ -22,10 +22,11 @@ from slmux import slip_encode
 # the world rather than for us?" check.
 _HOST_BYTES = socket.inet_aton(HOST_IP)
 
-# The board's link MTU.  DNS replies larger than this are dropped by the board's
-# IP layer, so the gateway trims them to fit (see _dns_fit_packet) -- the board
-# only ever keeps the first A record anyway.
-_BOARD_MTU = 128
+# The board's link MTU (keep in sync with the firmware's TIKU_KITS_NET_MTU).
+# DNS replies larger than this are dropped by the board's IP layer, so the
+# gateway trims them to fit (see _dns_fit_packet).  HTTPS builds raise the MTU
+# to 576 (RFC 791 minimum, MSS 536) so CDN segments fit -- match it here.
+_BOARD_MTU = 576
 
 
 class NatMixin:

@@ -13,6 +13,7 @@ SPDX-License-Identifier: Apache-2.0
 import os
 import struct
 import fcntl
+import codecs
 import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import Gtk, GLib  # noqa: E402
@@ -128,6 +129,10 @@ class ConnectionMixin:
         self.ser_src = GLib.unix_fd_add_full(GLib.PRIORITY_DEFAULT,
                                              self.ser.fileno(),
                                              GLib.IOCondition.IN, self._on_serial)
+        # Fresh incremental UTF-8 decoder per connection: the board's console
+        # output is UTF-8 (e.g. web pages via BROWSE); an incremental decoder
+        # carries a multibyte char split across reads instead of mojibaking it.
+        self._utf8_dec = codecs.getincrementaldecoder("utf-8")("replace")
         self.connect_btn.set_label("Disconnect")
         self.cview.remove_css_class("console-off")  # live: full colour, enterable
         self._update_leds()                        # USB light -> green
@@ -214,7 +219,7 @@ class ConnectionMixin:
         for b in data:
             if b == SLIP_END:
                 if text:
-                    s = text.decode("latin-1")
+                    s = self._utf8_dec.decode(bytes(text))
                     self.append(s); self._wifi_feed(s); text = bytearray()
                 if self.in_frame:
                     if self.frame:
@@ -227,7 +232,7 @@ class ConnectionMixin:
             else:
                 text.append(b)
         if text:
-            s = text.decode("latin-1"); self.append(s); self._wifi_feed(s)
+            s = self._utf8_dec.decode(bytes(text)); self.append(s); self._wifi_feed(s)
         return GLib.SOURCE_CONTINUE
 
     def _on_ip_packet(self, pkt):
