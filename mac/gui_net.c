@@ -525,11 +525,20 @@ static gboolean on_nat_switch(GtkSwitch *sw, gboolean state, gpointer user)
     wan_iface(wan, sizeof(wan));
     if (state) {
         /* macOS pf NAT: the iptables MASQUERADE equivalent.  pf is disabled by
-         * default on a dev Mac, so loading our rule + enabling pf is reversible
-         * with `pfctl -d`. */
+         * default on a dev Mac, so loading our rules + enabling pf is reversible
+         * with `pfctl -d`.  The `pass ... keep state` line is essential: a bare
+         * `nat` rule translated the TLS handshake fine but then dropped later
+         * return segments of a long-lived flow -- the HTTP response came back
+         * empty (HTTP 0,0 B) or the connection RST -- because pf needs an
+         * explicit stateful pass to match the return path.  It is the analogue
+         * of the Linux gateway's `FORWARD ... -m conntrack --ctstate
+         * ESTABLISHED,RELATED -j ACCEPT` rule (tcon/nat.py); ICMP survived the
+         * bare rule because it is stateless, which is why ping worked but
+         * HTTPS responses vanished. */
         bridge_run("sysctl -w net.inet.ip.forwarding=1 >/dev/null 2>&1");
-        bridge_run("printf 'nat on %s from %s to any -> (%s)\\n' | "
-                   "pfctl -f - 2>/dev/null", wan, SUBNET, wan);
+        bridge_run("printf 'nat on %s from %s to any -> (%s)\\n"
+                   "pass from %s to any keep state\\n' | "
+                   "pfctl -f - 2>/dev/null", wan, SUBNET, wan, SUBNET);
         bridge_run("pfctl -e 2>/dev/null");
         char m[160];
         snprintf(m, sizeof(m),
