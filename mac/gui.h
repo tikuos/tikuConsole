@@ -89,6 +89,8 @@ typedef struct App {
     int         sgr_fg;                /* 0 = default, else 30..37 */
     GtkTextTag *tag_fg[8];
     GtkTextTag *tag_bold, *tag_dim;
+    char        utf8_carry[8];         /* trailing partial multibyte char held */
+    int         utf8_carry_n;          /* bytes valid in utf8_carry */
 
     /* widgets: connection bar + console */
     GtkWidget     *port_dd;
@@ -110,6 +112,8 @@ typedef struct App {
     GtkWidget     *slip_btn;
     GtkWidget     *tun_lbl;
     GtkWidget     *cnt_lbl;
+    GtkWidget     *slip_tx_lbl, *slip_rx_lbl;  /* per-frame SLIP activity LEDs */
+    guint          slip_tx_src, slip_rx_src;   /* blink-off timeout handles */
     GtkWidget     *nat_sw;
     GtkWidget     *ping_entry;
     GtkWidget     *ping_spin;
@@ -138,6 +142,7 @@ typedef struct App {
     GtkWidget   *wifi_ping_t;     /* GtkEntry, default 8.8.8.8 */
     GtkWidget   *wifi_ntp_btn;    /* Time */
     GtkWidget   *wifi_net_lbl;    /* on-the-network status (_wifi_net_say) */
+    GtkWidget   *wifi_pane;       /* wrapper box: shown only for RP2350-class ports */
 
     /* Wi-Fi capture/orchestration state (ports _wifi_init) */
     int          wifi_capture;    /* enum WIFI_CAP_* */
@@ -152,6 +157,7 @@ typedef struct App {
     gboolean     wifi_joined;     /* last known radio link state (drives LED) */
     char         wifi_ip_shown[40]; /* stable lease for the chip ("" = none) */
     gboolean     wifi_auto_up;    /* a join auto-runs Go online (init TRUE) */
+    gboolean     wifi_board;      /* selected port is RP2350-class (gates the pane) */
 
     /* firmware build/flash bar */
     gboolean     bld_running;
@@ -162,6 +168,7 @@ typedef struct App {
     GtkWidget   *bld_radios[8];        /* one MCU radio per board */
     GtkWidget   *bld_btn;
     GtkWidget   *bld_shell, *bld_net, *bld_basic, *bld_color, *bld_wifi, *bld_usb;
+    GtkWidget   *bld_web;              /* web (HTTPS/TLS) firmware profile */
     GSubprocess *bld_proc;
     char         proj_dir[1024];       /* the tikuOS root (where make runs) */
     char         bld_board_key[32];
@@ -194,6 +201,8 @@ void send_line(App *app, const char *line);
 void set_status(App *app, const char *text, gboolean err);
 void update_leds(App *app);
 void console_append(App *app, const char *data, int len);
+const char *baud_get_text(App *app);          /* selected toolbar baud as a string */
+void baud_set_text(App *app, const char *s);  /* select the matching standard rate */
 
 /* --- gui_net.c --- */
 GtkWidget *build_netpanel(App *app);
@@ -201,6 +210,8 @@ void net_apply(App *app, gboolean active);
 void net_down(App *app);
 void net_on_ip_packet(App *app, const uint8_t *pkt, size_t len);
 gboolean net_counters_tick(gpointer user);
+void set_wifi_pane_visible(App *app, const char *plat);  /* RP2350-only WiFi pane */
+void slip_blink(App *app, const char *dir);              /* "tx"/"rx" activity pulse */
 
 /* --- gui_wifi.c --- */
 GtkWidget *build_wifi_panel(App *app);    /* the Wi-Fi section of the side panel */

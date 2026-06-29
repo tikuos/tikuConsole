@@ -35,7 +35,7 @@
 #include "gui.h"
 #include "packets.h"
 
-#define BOARD_MTU 128
+#define BOARD_MTU 576       /* match the firmware HTTPS link MTU (was 128) */
 
 static const uint8_t HOST_BYTES[4]  = {172, 16, 7, 1};
 static const uint8_t BOARD_BYTES[4] = {172, 16, 7, 2};
@@ -43,6 +43,40 @@ static const uint8_t BOARD_BYTES[4] = {172, 16, 7, 2};
 /* forward decls */
 static gboolean on_nat_switch(GtkSwitch *sw, gboolean state, gpointer user);
 static void on_slip_btn(GtkButton *b, gpointer user);
+
+/* ------------------------------------------------------------------------- */
+/* SLIP activity LEDs: a TX/RX arrow snaps bright on each frame, fades ~0.5s  */
+/* after traffic stops (CSS transition). Ports tcon's _slip_blink/_slip_off.  */
+/* ------------------------------------------------------------------------- */
+
+static gboolean slip_tx_off(gpointer user)
+{
+    App *app = user;
+    if (app->slip_tx_lbl) gtk_widget_remove_css_class(app->slip_tx_lbl, "tx-on");
+    app->slip_tx_src = 0;
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean slip_rx_off(gpointer user)
+{
+    App *app = user;
+    if (app->slip_rx_lbl) gtk_widget_remove_css_class(app->slip_rx_lbl, "rx-on");
+    app->slip_rx_src = 0;
+    return G_SOURCE_REMOVE;
+}
+
+void slip_blink(App *app, const char *dir)
+{
+    if (dir[0] == 't') {                         /* tx: host -> board */
+        if (app->slip_tx_lbl) gtk_widget_add_css_class(app->slip_tx_lbl, "tx-on");
+        if (app->slip_tx_src) g_source_remove(app->slip_tx_src);
+        app->slip_tx_src = g_timeout_add(140, slip_tx_off, app);
+    } else {                                     /* rx: board -> host */
+        if (app->slip_rx_lbl) gtk_widget_add_css_class(app->slip_rx_lbl, "rx-on");
+        if (app->slip_rx_src) g_source_remove(app->slip_rx_src);
+        app->slip_rx_src = g_timeout_add(140, slip_rx_off, app);
+    }
+}
 static void on_ping_clicked(GtkButton *b, gpointer user);
 static void on_ping_activate(GtkEntry *e, gpointer user);
 static int net_up(App *app);
@@ -234,6 +268,7 @@ static gboolean relay_reply(gint fd, GIOCondition cond, gpointer user)
         ser_write(app, (const char *)enc, el);
         app->fr_out++;
         app->by_out += (unsigned)fitlen;
+        slip_blink(app, "tx");
         char m[120];
         snprintf(m, sizeof(m), "[relay] %u.%u.%u.%u:%u -> board (%zdB)\n",
                  r->dst_ip[0], r->dst_ip[1], r->dst_ip[2], r->dst_ip[3],
@@ -327,6 +362,7 @@ void net_on_ip_packet(App *app, const uint8_t *pkt, size_t len)
 {
     app->fr_in++;
     app->by_in += (unsigned)len;
+    slip_blink(app, "rx");
     if (app->utun_fd >= 0) {
         utun_write(app->utun_fd, pkt, len);  /* root path: kernel routes it */
     } else {
@@ -370,6 +406,7 @@ static gboolean on_tun(gint fd, GIOCondition cond, gpointer user)
         ser_write(app, (const char *)enc, el);
         app->fr_out++;
         app->by_out += (unsigned)fitlen;
+        slip_blink(app, "tx");
     }
     return G_SOURCE_CONTINUE;
 }
@@ -555,15 +592,37 @@ static GtkWidget *section(const char *text)
     return l;
 }
 
+/* Show the WiFi pane only for RP2350-class ports (they speak the `wifi`
+ * command); other boards would just answer "Unknown command: wifi". Ports
+ * tcon's set_wifi_pane_visible. */
+void set_wifi_pane_visible(App *app, const char *plat)
+{
+    char low[64];
+    size_t i;
+    for (i = 0; plat && plat[i] && i < sizeof(low) - 1; i++) {
+        char c = plat[i];
+        low[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+    }
+    low[i] = '\0';
+    app->wifi_board = (strstr(low, "rp2") != NULL || strstr(low, "pico") != NULL);
+    if (app->wifi_pane) {
+        gtk_widget_set_visible(app->wifi_pane, app->wifi_board);
+    }
+}
+
 GtkWidget *build_netpanel(App *app)
 {
     GtkWidget *nbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_widget_set_size_request(nbox, 340, -1);
 
-    /* Wi-Fi (RP2350W) rides above the SLIP/IP networking controls. */
-    gtk_box_append(GTK_BOX(nbox), build_wifi_panel(app));
-    gtk_box_append(GTK_BOX(nbox),
+    /* Wi-Fi (RP2350W) rides above the SLIP/IP controls, in its own wrapper so
+     * it can be shown only for RP2350-class boards (set_wifi_pane_visible). */
+    app->wifi_pane = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_box_append(GTK_BOX(app->wifi_pane), build_wifi_panel(app));
+    gtk_box_append(GTK_BOX(app->wifi_pane),
                    gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
+    gtk_box_append(GTK_BOX(nbox), app->wifi_pane);
+    gtk_widget_set_visible(app->wifi_pane, FALSE);
 
     gtk_box_append(GTK_BOX(nbox), section("Networking (SLIP/IP over the wire)"));
     app->net_hint = gtk_label_new(NULL);
@@ -584,6 +643,16 @@ GtkWidget *build_netpanel(App *app)
     app->cnt_lbl = gtk_label_new("frames in/out: 0/0   bytes: 0/0");
     gtk_label_set_xalign(GTK_LABEL(app->cnt_lbl), 0);
     gtk_box_append(GTK_BOX(nbox), app->cnt_lbl);
+
+    /* per-frame SLIP activity arrows (glow on traffic, fade ~0.5s after) */
+    GtkWidget *slrow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    app->slip_tx_lbl = gtk_label_new("\xe2\x96\xb2 to board");
+    app->slip_rx_lbl = gtk_label_new("\xe2\x96\xbc from board");
+    gtk_widget_add_css_class(app->slip_tx_lbl, "slip-led");
+    gtk_widget_add_css_class(app->slip_rx_lbl, "slip-led");
+    gtk_box_append(GTK_BOX(slrow), app->slip_tx_lbl);
+    gtk_box_append(GTK_BOX(slrow), app->slip_rx_lbl);
+    gtk_box_append(GTK_BOX(nbox), slrow);
 
     gtk_box_append(GTK_BOX(nbox), section("Internet (NAT: board \xe2\x86\x92 "
                                           "internet)"));

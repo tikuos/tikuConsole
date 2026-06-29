@@ -75,6 +75,31 @@ void update_leds(App *app)
     wifi_update_led(app);
 }
 
+/* The connection-bar baud is a dropdown of standard rates (ports tcon's
+ * BaudPicker). These two shims keep the old string-based call sites working. */
+static const char *const BAUD_RATES[] = {
+    "9600", "19200", "38400", "57600",
+    "115200", "230400", "460800", "921600", NULL
+};
+#define BAUD_N        8       /* entries before the NULL terminator */
+#define BAUD_DEFAULT  4       /* index of "115200" */
+
+const char *baud_get_text(App *app)
+{
+    guint i = gtk_drop_down_get_selected(GTK_DROP_DOWN(app->baud));
+    return (i < BAUD_N) ? BAUD_RATES[i] : BAUD_RATES[BAUD_DEFAULT];
+}
+
+void baud_set_text(App *app, const char *s)
+{
+    for (guint i = 0; i < BAUD_N; i++) {
+        if (strcmp(BAUD_RATES[i], s) == 0) {
+            gtk_drop_down_set_selected(GTK_DROP_DOWN(app->baud), i);
+            return;
+        }
+    }
+}
+
 static void set_slip_led(App *app, gboolean on)
 {
     if (on != app->slip_on) {           /* driven by the board's own messages */
@@ -269,6 +294,56 @@ void console_append(App *app, const char *data, int len)
     g_string_free(s, TRUE);
 }
 
+/* Bytes at the tail of s[0..n) that begin an *incomplete* UTF-8 sequence (so
+ * they must be held back); 0 if s ends on a clean char boundary. GtkTextBuffer
+ * rejects invalid UTF-8, so a multibyte char split across a read() boundary
+ * would be mangled -- this lets console_append_serial carry the tail over. */
+static int utf8_tail_hold(const char *s, int n)
+{
+    int cont = 0, i = n;
+    while (i > 0 && cont < 3) {
+        unsigned char c = (unsigned char)s[i - 1];
+        if ((c & 0xC0) == 0x80) { cont++; i--; continue; }   /* continuation */
+        int need;
+        if      (c < 0x80)            need = 1;               /* ASCII */
+        else if ((c & 0xE0) == 0xC0) need = 2;
+        else if ((c & 0xF0) == 0xE0) need = 3;
+        else if ((c & 0xF8) == 0xF0) need = 4;
+        else                         return 0;                /* invalid lead */
+        int have = cont + 1;
+        return (have < need) ? have : 0;                      /* hold if short */
+    }
+    return 0;
+}
+
+/* Console path for the *serial* stream only (not app-injected messages): an
+ * incremental UTF-8 decoder, the C analogue of tcon's per-connection
+ * codecs.getincrementaldecoder("utf-8"). Holds back a trailing partial char. */
+static void console_append_serial(App *app, const char *data, int len)
+{
+    if (len <= 0 && app->utf8_carry_n == 0) {
+        return;
+    }
+    GString *u = g_string_new_len(app->utf8_carry, app->utf8_carry_n);
+    if (len > 0) {
+        g_string_append_len(u, data, len);
+    }
+    app->utf8_carry_n = 0;
+    int hold = utf8_tail_hold(u->str, (int)u->len);
+    if (hold > (int)u->len) {
+        hold = (int)u->len;
+    }
+    if (hold > 0) {
+        memcpy(app->utf8_carry, u->str + (int)u->len - hold, (size_t)hold);
+        app->utf8_carry_n = hold;
+        g_string_set_size(u, (gssize)((int)u->len - hold));
+    }
+    if (u->len) {
+        console_append(app, u->str, (int)u->len);
+    }
+    g_string_free(u, TRUE);
+}
+
 static void on_scroll_value(GtkAdjustment *adj, gpointer user)
 {
     App *app = user;
@@ -389,7 +464,7 @@ static gboolean on_serial_io(gint fd, GIOCondition cond, gpointer user)
         uint8_t b = buf[i];
         if (b == SLIP_END) {
             if (text->len) {
-                console_append(app, text->str, (int)text->len);
+                console_append_serial(app, text->str, (int)text->len);
                 wifi_feed(app, text->str, (int)text->len);
                 g_string_set_size(text, 0);
             }
@@ -413,7 +488,7 @@ static gboolean on_serial_io(gint fd, GIOCondition cond, gpointer user)
         }
     }
     if (text->len) {
-        console_append(app, text->str, (int)text->len);
+        console_append_serial(app, text->str, (int)text->len);
         wifi_feed(app, text->str, (int)text->len);
     }
     g_string_free(text, TRUE);
@@ -434,7 +509,7 @@ static void do_connect(App *app)
         set_status(app, "no serial port -- plug in a board and rescan", TRUE);
         return;
     }
-    unsigned baud = (unsigned)atoi(gtk_editable_get_text(GTK_EDITABLE(app->baud)));
+    unsigned baud = (unsigned)atoi(baud_get_text(app));
     int fd = serial_open(app->port_path, baud);
     if (fd < 0) {
         char e[400];
@@ -444,6 +519,7 @@ static void do_connect(App *app)
         return;
     }
     app->ser_fd = fd;
+    app->utf8_carry_n = 0;          /* fresh UTF-8 decoder per connection */
     app->ser_watch = g_unix_fd_add(fd, G_IO_IN, on_serial_io, app);
     gtk_button_set_label(GTK_BUTTON(app->connect_btn), "Disconnect");
     gtk_widget_remove_css_class(GTK_WIDGET(app->cview), "console-off");
@@ -532,14 +608,16 @@ static void port_changed_core(App *app)
         port_info_t *p = &app->ports[i];
         strlcpy(app->port_path, p->device, sizeof(app->port_path));
         gtk_label_set_text(GTK_LABEL(app->platform_lbl), p->label);
+        set_wifi_pane_visible(app, p->label);   /* WiFi pane only on RP2350-class */
         if (app->ser_fd < 0) {          /* don't fight a live session */
             char b[16];
             snprintf(b, sizeof(b), "%u", p->baud);
-            gtk_editable_set_text(GTK_EDITABLE(app->baud), b);
+            baud_set_text(app, b);
         }
     } else {
         app->port_path[0] = '\0';
         gtk_label_set_text(GTK_LABEL(app->platform_lbl), "--");
+        set_wifi_pane_visible(app, "");
     }
 }
 
@@ -656,6 +734,10 @@ static void install_css(void)
         " font-size:11pt; }"
         "textview.console { padding:4px; }"
         "textview.console.console-off { opacity:0.45; }"
+        ".slip-led { color:#555555;"
+        " transition:color 500ms ease-out, text-shadow 500ms ease-out; }"
+        ".slip-led.tx-on { color:#36c5f0; text-shadow:0 0 8px #36c5f0; }"
+        ".slip-led.rx-on { color:#5fd35f; text-shadow:0 0 8px #5fd35f; }"
         ".splash { background-image:"
         " linear-gradient(165deg,#ffffff 0%,#f4eee1 100%); }"
         ".splash-body { padding:6px 40px 20px 40px; }"
@@ -768,9 +850,8 @@ static void activate(GtkApplication *gapp, gpointer user)
     gtk_box_append(GTK_BOX(bar), app->platform_lbl);
     gtk_box_append(GTK_BOX(bar), gtk_separator_new(GTK_ORIENTATION_VERTICAL));
     gtk_box_append(GTK_BOX(bar), gtk_label_new("Baud"));
-    app->baud = gtk_entry_new();
-    gtk_editable_set_text(GTK_EDITABLE(app->baud), "115200");
-    gtk_editable_set_max_width_chars(GTK_EDITABLE(app->baud), 7);
+    app->baud = gtk_drop_down_new_from_strings(BAUD_RATES);
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(app->baud), BAUD_DEFAULT);
     gtk_box_append(GTK_BOX(bar), app->baud);
     gtk_box_append(GTK_BOX(bar), gtk_separator_new(GTK_ORIENTATION_VERTICAL));
     gtk_box_append(GTK_BOX(bar), gtk_label_new("Networking"));

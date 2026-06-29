@@ -522,6 +522,8 @@ static gboolean wifi_apply_ip_cb(gpointer user)
 gboolean wifi_sync_cb(gpointer user)
 {
     App *app = user;
+    if (!app->wifi_board)              /* non-RP2350 board has no `wifi` command */
+        return G_SOURCE_REMOVE;
     if (app->ser_fd < 0 || app->wifi_capture != WIFI_CAP_NONE)
         return G_SOURCE_REMOVE;
     g_string_truncate(app->wifi_linebuf, 0);

@@ -150,6 +150,7 @@ static void bld_build_flags(App *app, const board_t *b)
     gboolean net   = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_net));
     gboolean basic = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_basic));
     gboolean color = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_color));
+    gboolean web   = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_web));
     gboolean is_rp = (strcmp(b->family, "rp2350") == 0);
     gboolean wifi  = is_rp &&
                      gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_wifi));
@@ -159,9 +160,28 @@ static void bld_build_flags(App *app, const board_t *b)
     BLD_ADD(app, "HAS_TESTS=0");
     BLD_ADD(app, "HAS_EXAMPLES=0");
     BLD_ADD(app, shell ? "TIKU_SHELL_ENABLE=1" : "TIKU_SHELL_ENABLE=0");
-    BLD_ADD(app, basic ? "TIKU_SHELL_BASIC_ENABLE=1" : "TIKU_SHELL_BASIC_ENABLE=0");
+    /* web/HTTPS needs BASIC -- HTTPGET$/HTTPSTATUS/BROWSE live in the interpreter */
+    BLD_ADD(app, (basic || web) ? "TIKU_SHELL_BASIC_ENABLE=1"
+                                : "TIKU_SHELL_BASIC_ENABLE=0");
     BLD_ADD(app, color ? "TIKU_SHELL_COLOR=1" : "TIKU_SHELL_COLOR=0");
-    if (wifi) {
+    if (web) {
+        /* cert-TLS HTTPS profile: net-min IP stack + DNS + HTTP + crypto/TLS +
+         * the time kit (RTC dates the certs). TCP stays enabled (TLS needs it),
+         * so -- unlike the lean WiFi profile -- it is NOT dropped. On RP2350W,
+         * also bring the CYW43 radio + DHCP up so HTTPS rides WiFi. */
+        BLD_ADD(app, "TIKU_KIT_NET_ENABLE=1");
+        BLD_ADD(app, "TIKU_KIT_NET_MIN=1");
+        BLD_ADD(app, "TIKU_KITS_NET_DNS_ENABLE=1");
+        BLD_ADD(app, "TIKU_KITS_NET_HTTP_ENABLE=1");
+        BLD_ADD(app, "TIKU_KIT_CRYPTO_ENABLE=1");
+        BLD_ADD(app, "HAS_TLS=1");
+        BLD_ADD(app, "TIKU_KIT_TIME_ENABLE=1");
+        if (wifi) {
+            BLD_ADD(app, "TIKU_DRV_WIFI_CYW43_ENABLE=1");
+            BLD_ADD(app, "TIKU_KITS_NET_WIFI_ENABLE=1");
+            BLD_ADD(app, "TIKU_KITS_NET_DHCP_ENABLE=1");
+        }
+    } else if (wifi) {
         /* RP2350W: the HW-verified lean WiFi profile -- CYW43 driver + the
          * net-min IP stack (ipv4/icmp/udp) + DHCP/DNS + the time kit for NTP,
          * with the heavy autostarted servers (TCP/CoAP/MQTT/syslog/TFTP) dropped
@@ -195,7 +215,12 @@ static void bld_build_flags(App *app, const board_t *b)
     char tmp[64];
     snprintf(tmp, sizeof(tmp), "MCU=%s", b->mcu);
     BLD_ADD(app, tmp);
-    snprintf(tmp, sizeof(tmp), "UART_BAUD=%d", b->baud);
+    /* flash at the toolbar-selected baud (falls back to the board default) */
+    int ubaud = atoi(baud_get_text(app));
+    if (ubaud <= 0) {
+        ubaud = b->baud;
+    }
+    snprintf(tmp, sizeof(tmp), "UART_BAUD=%d", ubaud);
     BLD_ADD(app, tmp);
 }
 
@@ -206,10 +231,12 @@ static void bld_profile(App *app, const board_t *b, char *out, size_t len)
         gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_wifi));
     /* On RP2350 'wifi' supersedes 'net'; elsewhere the WiFi/USB boxes have no
      * effect so they never appear in the profile label. */
+    gboolean web_on = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_web));
     const struct { gboolean on; const char *n; } F[] = {
         { gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_shell)), "shell" },
-        { wifi_on,                                                       "wifi"  },
-        { !wifi_on &&
+        { web_on,                                                        "web"   },
+        { wifi_on && !web_on,                                            "wifi"  },
+        { !wifi_on && !web_on &&
           gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_net)),   "net"   },
         { gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_basic)), "BASIC" },
         { gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_color)), "colour"},
@@ -345,12 +372,9 @@ static void bld_done(App *app, gboolean ok)
     console_append(app, "\x1b[1;32m\xe2\x94\x80\xe2\x94\x80 build + flash OK "
                    "-- connecting\xe2\x80\xa6 \xe2\x94\x80\xe2\x94\x80\x1b[0m\n",
                    -1);
-    /* Match the console baud to the flashed board, then auto-connect.  The
-     * board reboots after `make flash` and may re-enumerate, so poll for the
-     * port instead of a single shot. */
-    char b[16];
-    snprintf(b, sizeof(b), "%d", app->bld_board_baud);
-    gtk_editable_set_text(GTK_EDITABLE(app->baud), b);
+    /* The toolbar already holds the baud we flashed at (UART_BAUD), so leave it
+     * be and just auto-connect.  The board reboots after `make flash` and may
+     * re-enumerate, so poll for the port instead of a single shot. */
     char st[140];
     snprintf(st, sizeof(st), "flashed %s -- waiting for the port\xe2\x80\xa6",
              app->bld_board_key);
@@ -537,6 +561,7 @@ GtkWidget *build_buildbar(App *app)
     app->bld_color = gtk_check_button_new_with_label("colour");
     app->bld_wifi = gtk_check_button_new_with_label("WiFi");
     app->bld_usb = gtk_check_button_new_with_label("USB console");
+    app->bld_web = gtk_check_button_new_with_label("web (HTTPS)");
     gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_shell), TRUE);
     gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_net), TRUE);
     gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_color), TRUE);
@@ -557,12 +582,16 @@ GtkWidget *build_buildbar(App *app)
     gtk_widget_set_tooltip_text(app->bld_usb,
         "RP2350 only: put the console on the native USB CDC (TIKU_CONSOLE=usb) -- "
         "the port this app connects to. Uncheck only for an external UART/FT232 rig.");
+    gtk_widget_set_tooltip_text(app->bld_web,
+        "cert-TLS HTTPS profile: TLS/crypto + HTTP + DNS + RTC time (forces BASIC "
+        "on for HTTPGET$/BROWSE). Rides WiFi on RP2350W, or SLIP elsewhere.");
     gtk_box_append(GTK_BOX(frow), app->bld_shell);
     gtk_box_append(GTK_BOX(frow), app->bld_net);
     gtk_box_append(GTK_BOX(frow), app->bld_basic);
     gtk_box_append(GTK_BOX(frow), app->bld_color);
     gtk_box_append(GTK_BOX(frow), app->bld_wifi);
     gtk_box_append(GTK_BOX(frow), app->bld_usb);
+    gtk_box_append(GTK_BOX(frow), app->bld_web);
 
     app->bld_btn = gtk_button_new_with_label("Build & Flash");
     gtk_widget_add_css_class(app->bld_btn, "suggested-action");
