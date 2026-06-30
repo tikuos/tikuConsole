@@ -111,6 +111,18 @@ class BuildMixin:
             w.set_tooltip_text(tip)
             frow.append(w)
 
+        # web (HTTPS) forces BASIC on (HTTPGET$/BROWSE are BASIC builtins), so
+        # make that visible instead of silently overriding an unchecked box:
+        # while web is checked, tick BASIC and lock it (insensitive); restore
+        # user control when web is unchecked.
+        def _web_locks_basic(*_):
+            on = self.bld_web.get_active()
+            if on:
+                self.bld_basic.set_active(True)
+            self.bld_basic.set_sensitive(not on)
+        self.bld_web.connect("toggled", _web_locks_basic)
+        _web_locks_basic()
+
         self.bld_btn = Gtk.Button(label="Build & Flash")
         self.bld_btn.add_css_class("suggested-action")
         self.bld_btn.set_hexpand(True)

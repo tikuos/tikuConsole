@@ -508,6 +508,19 @@ void bld_autoselect(App *app)
     app->bld_set_programmatic = FALSE;
 }
 
+/* web (HTTPS) forces BASIC on (HTTPGET$/BROWSE are BASIC builtins); make that
+ * visible instead of silently overriding an unchecked box -- tick BASIC and
+ * lock it while web is on, restore user control when web is off. */
+static void on_web_locks_basic(GtkCheckButton *web, gpointer ud)
+{
+    App *app = ud;
+    gboolean on = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_web));
+    if (on)
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_basic), TRUE);
+    gtk_widget_set_sensitive(app->bld_basic, !on);
+    (void)web;
+}
+
 GtkWidget *build_buildbar(App *app)
 {
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
@@ -592,6 +605,9 @@ GtkWidget *build_buildbar(App *app)
     gtk_box_append(GTK_BOX(frow), app->bld_wifi);
     gtk_box_append(GTK_BOX(frow), app->bld_usb);
     gtk_box_append(GTK_BOX(frow), app->bld_web);
+    /* keep the BASIC box in sync with web's forced-on coupling (see above) */
+    g_signal_connect(app->bld_web, "toggled", G_CALLBACK(on_web_locks_basic), app);
+    on_web_locks_basic(NULL, app);
 
     app->bld_btn = gtk_button_new_with_label("Build & Flash");
     gtk_widget_add_css_class(app->bld_btn, "suggested-action");
