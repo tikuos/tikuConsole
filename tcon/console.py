@@ -14,7 +14,7 @@ SPDX-License-Identifier: Apache-2.0
 import re
 import gi
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk, Gdk, Pango  # noqa: E402
+from gi.repository import Gtk, Gdk, Pango, GLib  # noqa: E402
 
 from tcon import GREEN  # noqa: E402
 
@@ -133,8 +133,17 @@ class ConsoleMixin:
             self.cadj.connect("changed", self._on_scroll_changed)
         self.ansi_pending = ""
         self.cur = []                       # active ANSI tag names
+        # Block cursor at the buffer end (where the board echoes typed chars):
+        # a reverse-video space that append() strips before inserting and re-adds
+        # after, so the real text + backspace are never disturbed.  A 530 ms
+        # timer blinks it by toggling the tag; only shown on a live connection.
+        self.tags["cursor"] = self.cbuf.create_tag("cursor", background="#cccccc")
+        self._cur_present = False
+        self._blink_state = True
+        GLib.timeout_add(530, self._cursor_blink)
 
     def append(self, text):
+        self._cursor_off()                  # act on the real text end (re-added below)
         # Drive the SLIP light off the board's own status lines.  A small
         # rolling tail keeps it working even if the line spans two reads.
         self.slip_scan = (self.slip_scan + text)[-96:]
@@ -157,6 +166,7 @@ class ConsoleMixin:
             pos = m.end()
         if pos < len(s):
             self._insert(s[pos:])
+        self._cursor_on()                   # block cursor at the new end
 
     def _on_scroll_value(self, adj):
         """Track whether the view is pinned to the end (vs. scrolled up)."""
@@ -218,3 +228,43 @@ class ConsoleMixin:
                 self.cur = [t for t in self.cur if not t.startswith("fg")] + ["fg%d" % c]
             elif 90 <= c <= 97:
                 self.cur = [t for t in self.cur if not t.startswith("fg")] + ["fg%d" % (c - 60)]
+
+    # ----- block cursor: a reverse-video placeholder at the buffer tail ----- #
+    def _cursor_on(self):
+        """Add the block-cursor placeholder at the end (connected only)."""
+        if self._cur_present or self.ser is None:
+            return
+        it = self.cbuf.get_end_iter()
+        self.cbuf.insert_with_tags(it, " ", self.tags["cursor"])
+        self._cur_present = True
+        self._blink_state = True            # solid right after fresh output
+
+    def _cursor_off(self):
+        """Strip the placeholder so inserts/backspace act on the real text."""
+        if not self._cur_present:
+            return
+        end = self.cbuf.get_end_iter()
+        start = end.copy()
+        if start.backward_char():
+            self.cbuf.delete(start, end)
+        self._cur_present = False
+
+    def _cursor_blink(self, *_):
+        """Toggle the cursor tag ~twice a second; keep it hidden while
+        disconnected.  Returns True so the GLib timer keeps firing."""
+        if self.ser is None:                # not connected -> no cursor
+            self._cursor_off()
+            return True
+        if not self._cur_present:           # connected but idle -> make one
+            self._cursor_on()
+            return True
+        end = self.cbuf.get_end_iter()
+        start = end.copy()
+        if not start.backward_char():
+            return True
+        self._blink_state = not self._blink_state
+        if self._blink_state:
+            self.cbuf.apply_tag(self.tags["cursor"], start, end)
+        else:
+            self.cbuf.remove_tag(self.tags["cursor"], start, end)
+        return True
