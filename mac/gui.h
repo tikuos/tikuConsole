@@ -90,7 +90,8 @@ typedef struct App {
     gboolean    sgr_bold, sgr_dim;
     int         sgr_fg;                /* 0 = default, else 30..37 */
     GtkTextTag *tag_fg[8];
-    GtkTextTag *tag_bold, *tag_dim;
+    GtkTextTag *tag_bold, *tag_dim, *tag_cursor;
+    gboolean    cur_present, blink_state;   /* block-cursor state */
     char        utf8_carry[8];         /* trailing partial multibyte char held */
     int         utf8_carry_n;          /* bytes valid in utf8_carry */
 

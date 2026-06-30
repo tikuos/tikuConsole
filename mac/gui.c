@@ -262,12 +262,70 @@ static int csi_end(const char *s, int from, int n)
     return -1;
 }
 
+/* Block cursor: a reverse-video space at the buffer tail (where the board echoes
+ * typed chars).  console_append() strips it before inserting and re-adds it
+ * after, so real text + backspace are untouched; cursor_blink_cb toggles the
+ * tag ~twice a second.  Shown only while connected (ser_fd >= 0). */
+static void cursor_off(App *app)
+{
+    if (!app->cur_present) {
+        return;
+    }
+    GtkTextIter end, start;
+    gtk_text_buffer_get_end_iter(app->cbuf, &end);
+    start = end;
+    if (gtk_text_iter_backward_char(&start)) {
+        gtk_text_buffer_delete(app->cbuf, &start, &end);
+    }
+    app->cur_present = FALSE;
+}
+
+static void cursor_on(App *app)
+{
+    if (app->cur_present || app->ser_fd < 0) {
+        return;
+    }
+    GtkTextIter end;
+    gtk_text_buffer_get_end_iter(app->cbuf, &end);
+    gtk_text_buffer_insert_with_tags(app->cbuf, &end, " ", 1,
+                                     app->tag_cursor, NULL);
+    app->cur_present = TRUE;
+    app->blink_state = TRUE;             /* solid right after fresh output */
+}
+
+static gboolean cursor_blink_cb(gpointer ud)
+{
+    App *app = ud;
+    if (app->ser_fd < 0) {               /* not connected -> no cursor */
+        cursor_off(app);
+        return G_SOURCE_CONTINUE;
+    }
+    if (!app->cur_present) {             /* connected but idle -> make one */
+        cursor_on(app);
+        return G_SOURCE_CONTINUE;
+    }
+    GtkTextIter end, start;
+    gtk_text_buffer_get_end_iter(app->cbuf, &end);
+    start = end;
+    if (!gtk_text_iter_backward_char(&start)) {
+        return G_SOURCE_CONTINUE;
+    }
+    app->blink_state = !app->blink_state;
+    if (app->blink_state) {
+        gtk_text_buffer_apply_tag(app->cbuf, app->tag_cursor, &start, &end);
+    } else {
+        gtk_text_buffer_remove_tag(app->cbuf, app->tag_cursor, &start, &end);
+    }
+    return G_SOURCE_CONTINUE;
+}
+
 void console_append(App *app, const char *data, int len)
 {
     if (len < 0) {
         len = (int)strlen(data);
     }
     led_scan(app, data, len);
+    cursor_off(app);                /* act on the real text end (re-added below) */
 
     GString *s = g_string_new_len(app->ansi_pending->str,
                                   (gssize)app->ansi_pending->len);
@@ -314,6 +372,7 @@ void console_append(App *app, const char *data, int len)
     if (pos < n) {
         console_insert(app, s->str + pos, n - pos);
     }
+    cursor_on(app);                 /* block cursor at the new end */
     g_string_free(s, TRUE);
 }
 
@@ -840,6 +899,9 @@ static void make_console_tags(App *app)
         "weight", PANGO_WEIGHT_BOLD, NULL);
     app->tag_dim = gtk_text_buffer_create_tag(app->cbuf, NULL,
         "foreground", "#7f7f7f", NULL);
+    app->tag_cursor = gtk_text_buffer_create_tag(app->cbuf, NULL,
+        "background", "#cccccc", NULL);
+    g_timeout_add(530, cursor_blink_cb, app);   /* blink the block cursor */
 }
 
 static gboolean smoke_quit(gpointer user)
