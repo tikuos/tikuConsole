@@ -486,24 +486,36 @@ static gboolean on_serial_io(gint fd, GIOCondition cond, gpointer user)
     for (ssize_t i = 0; i < nr; i++) {
         uint8_t b = buf[i];
         if (b == SLIP_END) {
+            /* END flushes pending console text, ends any frame, and re-arms: the
+             * next byte starts a frame only if it is an IPv4 nibble (0x4N), and
+             * an emitted frame is validated (version + total length).  Anchoring
+             * on END+0x4N rather than a bare END toggle makes the demux
+             * self-syncing, so a dropped byte (J-Link VCOM under back-to-back
+             * load) costs at most the one damaged frame instead of permanently
+             * flipping the toggle phase and cascade-dropping all frames after. */
             if (text->len) {
                 console_append_serial(app, text->str, (int)text->len);
                 wifi_feed(app, text->str, (int)text->len);
                 g_string_set_size(text, 0);
             }
-            if (app->in_frame) {
-                if (app->frame->len) {
-                    uint8_t ip[BRIDGE_MTU * 2];
-                    size_t iplen = slip_unescape(app->frame->data,
-                                                 app->frame->len, ip);
+            if (app->in_frame && app->frame->len) {
+                uint8_t ip[BRIDGE_MTU * 2];
+                size_t iplen = slip_unescape(app->frame->data,
+                                             app->frame->len, ip);
+                if (iplen >= 20 && (ip[0] & 0xF0) == 0x40 &&
+                    (((size_t)ip[2] << 8) | ip[3]) == iplen) {
                     net_on_ip_packet(app, ip, iplen);
                 }
-                g_byte_array_set_size(app->frame, 0);
-                app->in_frame = FALSE;
-            } else {
-                app->in_frame = TRUE;
-                g_byte_array_set_size(app->frame, 0);
+                /* else: mis-framed (a byte was lost) -> drop and re-sync */
             }
+            g_byte_array_set_size(app->frame, 0);
+            app->in_frame = FALSE;
+            app->slip_armed = TRUE;
+        } else if (app->slip_armed && (b & 0xF0) == 0x40) {
+            app->slip_armed = FALSE;
+            app->in_frame = TRUE;
+            g_byte_array_set_size(app->frame, 0);
+            g_byte_array_append(app->frame, &b, 1);
         } else if (app->in_frame) {
             /* cap the frame at the decode buffer so a garbled/hostile stream
              * can't grow it unbounded or overflow ip[BRIDGE_MTU*2] above */
@@ -511,6 +523,7 @@ static gboolean on_serial_io(gint fd, GIOCondition cond, gpointer user)
                 g_byte_array_append(app->frame, &b, 1);
             }
         } else {
+            app->slip_armed = FALSE;
             g_string_append_c(text, (char)b);
         }
     }
@@ -584,6 +597,7 @@ static void teardown(App *app)
     }
     app->slip_on = FALSE;
     app->in_frame = FALSE;
+    app->slip_armed = FALSE;
     g_byte_array_set_size(app->frame, 0);
     /* Wi-Fi: drop the link state + hide the side panel on disconnect */
     app->wifi_joined = FALSE;

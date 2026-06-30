@@ -58,6 +58,8 @@ typedef struct App {
 
     /* SLIP demux state */
     gboolean    in_frame;
+    gboolean    slip_armed;     /* self-syncing SLIP demux: END arms; a frame
+                                 * starts only on a following IPv4 nibble (0x4N) */
     GByteArray *frame;
 
     /* status lights */

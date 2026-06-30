@@ -218,18 +218,30 @@ class ConnectionMixin:
         text = bytearray()
         for b in data:
             if b == SLIP_END:
+                # END flushes pending console text, ends any frame, and re-arms:
+                # the next byte may start a frame (only if it is an IPv4 nibble).
+                # Anchoring frame-start on END+0x4N -- not a bare END toggle --
+                # makes the demux self-syncing, so a dropped byte (J-Link VCOM
+                # under back-to-back load) costs at most the one damaged frame
+                # instead of permanently flipping the toggle phase and cascading.
                 if text:
                     s = self._utf8_dec.decode(bytes(text))
                     self.append(s); self._wifi_feed(s); text = bytearray()
-                if self.in_frame:
-                    if self.frame:
-                        self._on_ip_packet(slip_unescape(self.frame))
-                    self.frame = bytearray(); self.in_frame = False
-                else:
-                    self.in_frame = True; self.frame = bytearray()
+                if self.in_frame and self.frame:
+                    pkt = slip_unescape(self.frame)
+                    if (len(pkt) >= 20 and (pkt[0] & 0xF0) == 0x40 and
+                            ((pkt[2] << 8) | pkt[3]) == len(pkt)):
+                        self._on_ip_packet(pkt)
+                    # else: mis-framed (a byte was lost) -> drop and re-sync
+                self.in_frame = False; self.frame = bytearray()
+                self._slip_armed = True
+            elif self._slip_armed and (b & 0xF0) == 0x40:
+                self._slip_armed = False
+                self.in_frame = True; self.frame = bytearray((b,))
             elif self.in_frame:
                 self.frame.append(b)
             else:
+                self._slip_armed = False
                 text.append(b)
         if text:
             s = self._utf8_dec.decode(bytes(text)); self.append(s); self._wifi_feed(s)

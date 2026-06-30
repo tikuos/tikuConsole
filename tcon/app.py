@@ -62,9 +62,11 @@ class TikuConsole(ConsoleMixin, ConnectionMixin, PingMixin, NatMixin,
         self.net = False                 # networking mode active this session
         self.ports = []
         self.port_path = None
-        # SLIP demux state
+        # SLIP demux state (self-syncing: frame-start anchored on END + IPv4
+        # nibble, so a dropped byte costs one frame, not a wedged toggle)
         self.in_frame = False
         self.frame = bytearray()
+        self._slip_armed = False
         # traffic-light status: board SLIP enabled / host NAT (Internet) active
         self.slip_on = False
         self.nat_on = False

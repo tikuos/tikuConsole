@@ -152,6 +152,7 @@ int main(int argc, char **argv)
 
     /* Board->host SLIP reassembly state. */
     int in_frame = 0;
+    int slip_armed = 0;     /* self-syncing: a frame starts only at END + 0x4N */
     uint8_t frame[BRIDGE_MTU * 2];
     size_t flen = 0;
 
@@ -181,23 +182,33 @@ int main(int argc, char **argv)
             for (ssize_t i = 0; i < n; i++) {
                 uint8_t b = buf[i];
                 if (b == SLIP_END) {
-                    if (in_frame) {
-                        if (flen > 0) {
-                            uint8_t ip[BRIDGE_MTU * 2];
-                            size_t iplen = slip_unescape(frame, flen, ip);
+                    /* END ends a frame and re-arms; a frame starts only at
+                     * END + an IPv4 nibble (0x4N) and is validated (version +
+                     * total length).  Self-syncing: a dropped byte (J-Link VCOM
+                     * under load) costs one frame, not a wedged toggle phase
+                     * that drops every frame after it. */
+                    if (in_frame && flen > 0) {
+                        uint8_t ip[BRIDGE_MTU * 2];
+                        size_t iplen = slip_unescape(frame, flen, ip);
+                        if (iplen >= 20 && (ip[0] & 0xF0) == 0x40 &&
+                            (((size_t)ip[2] << 8) | ip[3]) == iplen) {
                             utun_write(utun, ip, iplen);
                         }
-                        in_frame = 0;
-                        flen = 0;
-                    } else {
-                        in_frame = 1;
-                        flen = 0;
                     }
+                    in_frame = 0;
+                    flen = 0;
+                    slip_armed = 1;
+                } else if (slip_armed && (b & 0xF0) == 0x40) {
+                    slip_armed = 0;
+                    in_frame = 1;
+                    flen = 0;
+                    frame[flen++] = b;
                 } else if (in_frame) {
                     if (flen < sizeof(frame)) {
                         frame[flen++] = b;
                     }
                 } else {
+                    slip_armed = 0;
                     (void)write(STDOUT_FILENO, &b, 1);  /* console text */
                 }
             }
