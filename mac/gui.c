@@ -477,14 +477,21 @@ static gboolean on_key(GtkEventControllerKey *c, guint keyval, guint keycode,
     }
 
     gboolean ctrl = (state & GDK_CONTROL_MASK) != 0;
-    if (ctrl && (keyval == GDK_KEY_c || keyval == GDK_KEY_C)) {
+    /* macOS Command key -> Meta (some GDK backends Super). Accept it for
+     * copy/paste so Cmd-C / Cmd-V work like every other Mac app; the generic
+     * Ctrl-<letter> control codes further down stay Ctrl-only. */
+    gboolean cmd = (state & (GDK_META_MASK | GDK_SUPER_MASK)) != 0;
+    if ((ctrl || cmd) && (keyval == GDK_KEY_c || keyval == GDK_KEY_C)) {
         if (gtk_text_buffer_get_has_selection(app->cbuf)) {
             return FALSE;               /* copy the selection */
         }
-        ser_write(app, "\x03", 1);      /* else send ^C */
-        return TRUE;
+        if (ctrl) {                     /* bare Ctrl-C with no selection = ^C */
+            ser_write(app, "\x03", 1);
+            return TRUE;
+        }
+        return TRUE;                    /* Cmd-C, no selection: swallow */
     }
-    if (ctrl && (keyval == GDK_KEY_v || keyval == GDK_KEY_V)) {
+    if ((ctrl || cmd) && (keyval == GDK_KEY_v || keyval == GDK_KEY_V)) {
         GdkClipboard *cb = gtk_widget_get_clipboard(GTK_WIDGET(app->cview));
         gdk_clipboard_read_text_async(cb, NULL, on_paste, app);
         return TRUE;

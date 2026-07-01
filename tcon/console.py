@@ -41,11 +41,17 @@ class ConsoleMixin:
         if self.ser is None:
             return False
         ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
-        if ctrl and keyval in (Gdk.KEY_c, Gdk.KEY_C):   # copy if selecting, else ^C
+        # macOS Command key -> Meta (some GDK backends Super); accept it for
+        # copy/paste so Cmd-C / Cmd-V work natively. Generic Ctrl-<letter>
+        # control codes below stay Ctrl-only.
+        cmd = bool(state & (Gdk.ModifierType.META_MASK | Gdk.ModifierType.SUPER_MASK))
+        if (ctrl or cmd) and keyval in (Gdk.KEY_c, Gdk.KEY_C):  # copy sel, else ^C
             if self.cbuf.get_has_selection():
                 return False
-            self.ser.write(b"\x03"); return True
-        if ctrl and keyval in (Gdk.KEY_v, Gdk.KEY_V):   # paste clipboard to board
+            if ctrl:                                    # bare Ctrl-C = ^C
+                self.ser.write(b"\x03")
+            return True
+        if (ctrl or cmd) and keyval in (Gdk.KEY_v, Gdk.KEY_V):  # paste to board
             self.cview.get_clipboard().read_text_async(None, self._paste_done)
             return True
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
