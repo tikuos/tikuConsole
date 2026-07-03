@@ -46,6 +46,7 @@ static const board_t BOARDS[] = {
     {"msp430fr5994", "msp430fr5994", "msp430", 9600,   "MSP430",       "FR5994"},
     {"msp430fr6989", "msp430fr6989", "msp430", 9600,   "MSP430",       "FR6989"},
     {"apollo510",    "apollo510",    "ambiq",  115200, "Apollo",       "Apollo510"},
+    {"apollo510b",   "apollo510b",   "ambiq",  115200, "Apollo",       "Apollo510 Blue"},
     {"apollo4l",     "apollo4l",     "ambiq",  115200, "Apollo",       "Apollo4 Lite"},
     {"apollo4p",     "apollo4p",     "ambiq",  115200, "Apollo",       "Apollo4 Plus"},
     {"rp2350",       "rp2350",       "rp2350", 115200, "Raspberry Pi", "RP2350"},
