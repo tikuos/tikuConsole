@@ -43,6 +43,22 @@ TIKUCONSOLE_NO_SPLASH=1 python3 tikuconsole.py  # skip the splash screen
 The board's IP defaults to **172.16.7.2** (host **172.16.7.1**); set it on the
 firmware side with `make … IP=10.0.0.5` and keep both ends in sync.
 
+## Wireless shell over BLE (tikuble.py)
+
+`tikuble.py` is the same tikuOS shell with no wire at all: boards with a BLE
+radio (Apollo510 Blue EVB) expose the console over the Nordic UART Service.
+Run `ble uart` on the board, then:
+
+```bash
+pip install bleak            # macOS / Linux BLE client library
+python3 tikuble.py           # scan for "tikuOS", connect, interactive shell
+python3 tikuble.py --cmd info --cmd free   # scripted: run commands, print output
+python3 tikuble.py --scan    # list nearby BLE devices
+```
+
+Quit the interactive session with **Ctrl-]** (Ctrl-C passes through to the
+board).
+
 ## License
 
 Apache-2.0 © TikuOS · Ambuj Varshney &lt;ambuj@tiku-os.org&gt;
