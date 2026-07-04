@@ -1056,6 +1056,7 @@ static void activate(GtkApplication *gapp, gpointer user)
         "(Nordic UART Service); run `ble uart` on the board first");
     g_signal_connect(app->ble_btn, "clicked", G_CALLBACK(on_ble_clicked), app);
     gtk_box_append(GTK_BOX(bar), app->ble_btn);
+    gtk_widget_set_visible(app->ble_btn, FALSE);  /* Blue board only (build bar) */
     app->connect_btn = gtk_button_new_with_label("Connect");
     gtk_widget_add_css_class(app->connect_btn, "suggested-action");
     gtk_widget_set_hexpand(app->connect_btn, TRUE);
@@ -1115,6 +1116,7 @@ static void activate(GtkApplication *gapp, gpointer user)
     g_timeout_add(500, net_counters_tick, app);
     refresh_ports(app);
     update_leds(app);
+    bld_update_ble_ui(app);         /* BLE controls: Blue board only */
 
     const char *smoke = g_getenv("TIKUCONSOLE_SMOKE_MS");
     gboolean force_splash = g_getenv("TIKUCONSOLE_FORCE_SPLASH") != NULL;

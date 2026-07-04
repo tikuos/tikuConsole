@@ -157,10 +157,14 @@ static void bld_build_flags(App *app, const board_t *b)
                      gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_wifi));
     gboolean usb   = is_rp &&
                      gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_usb));
+    /* The EM9305 BLE radio exists only on the Apollo510 Blue EVB. */
+    gboolean ble   = (strcmp(b->key, "apollo510b") == 0) &&
+                     gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_ble));
 
     BLD_ADD(app, "HAS_TESTS=0");
     BLD_ADD(app, "HAS_EXAMPLES=0");
-    BLD_ADD(app, shell ? "TIKU_SHELL_ENABLE=1" : "TIKU_SHELL_ENABLE=0");
+    /* BLE needs the shell (the `ble` command + wireless-shell backend live there). */
+    BLD_ADD(app, (shell || ble) ? "TIKU_SHELL_ENABLE=1" : "TIKU_SHELL_ENABLE=0");
     /* web/HTTPS needs BASIC -- HTTPGET$/HTTPSTATUS/BROWSE live in the interpreter */
     BLD_ADD(app, (basic || web) ? "TIKU_SHELL_BASIC_ENABLE=1"
                                 : "TIKU_SHELL_BASIC_ENABLE=0");
@@ -213,6 +217,9 @@ static void bld_build_flags(App *app, const board_t *b)
     if (usb) {
         BLD_ADD(app, "TIKU_CONSOLE=usb");
     }
+    if (ble) {
+        BLD_ADD(app, "TIKU_DRV_BLE_EM9305_ENABLE=1");
+    }
     char tmp[64];
     snprintf(tmp, sizeof(tmp), "MCU=%s", b->mcu);
     BLD_ADD(app, tmp);
@@ -233,8 +240,11 @@ static void bld_profile(App *app, const board_t *b, char *out, size_t len)
     /* On RP2350 'wifi' supersedes 'net'; elsewhere the WiFi/USB boxes have no
      * effect so they never appear in the profile label. */
     gboolean web_on = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_web));
+    gboolean ble_on = (strcmp(b->key, "apollo510b") == 0) &&
+        gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_ble));
     const struct { gboolean on; const char *n; } F[] = {
         { gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_shell)), "shell" },
+        { ble_on,                                                        "ble"   },
         { web_on,                                                        "web"   },
         { wifi_on && !web_on,                                            "wifi"  },
         { !wifi_on && !web_on &&
@@ -452,6 +462,32 @@ static void on_build_flash(GtkButton *btn, gpointer user)
 /* Bar assembly                                                              */
 /* ------------------------------------------------------------------------- */
 
+/* The board whose radio is currently active (NULL if none). */
+static const board_t *bld_selected_board(App *app)
+{
+    for (int i = 0; i < app->bld_nradios; i++) {
+        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_radios[i]))) {
+            return &BOARDS[i];
+        }
+    }
+    return NULL;
+}
+
+/* The EM9305 radio is unique to the Apollo510 Blue EVB, so the "Bluetooth"
+ * build box and the toolbar "BLE" connect button only make sense there. Keep
+ * the button visible during a live BLE session so it can still disconnect. */
+void bld_update_ble_ui(App *app)
+{
+    const board_t *b = bld_selected_board(app);
+    gboolean is_blue = (b != NULL && strcmp(b->key, "apollo510b") == 0);
+    if (app->bld_ble) {
+        gtk_widget_set_visible(app->bld_ble, is_blue);
+    }
+    if (app->ble_btn) {
+        gtk_widget_set_visible(app->ble_btn, is_blue || app->ble_on);
+    }
+}
+
 /* A user toggling an MCU stops auto-select from overriding their choice. */
 static void on_mcu_toggled(GtkCheckButton *rb, gpointer user)
 {
@@ -462,6 +498,7 @@ static void on_mcu_toggled(GtkCheckButton *rb, gpointer user)
     if (gtk_check_button_get_active(rb)) {
         app->bld_user_picked = TRUE;
     }
+    bld_update_ble_ui(app);                    /* show/hide BLE controls */
 }
 
 /* Auto-select the MCU family of a currently-attached board.  Detection is
@@ -507,6 +544,7 @@ void bld_autoselect(App *app)
     app->bld_set_programmatic = TRUE;
     gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_radios[idx]), TRUE);
     app->bld_set_programmatic = FALSE;
+    bld_update_ble_ui(app);                    /* auto-pick never lands on Blue */
 }
 
 /* web (HTTPS) forces BASIC on (HTTPGET$/BROWSE are BASIC builtins); make that
@@ -576,6 +614,8 @@ GtkWidget *build_buildbar(App *app)
     app->bld_wifi = gtk_check_button_new_with_label("WiFi");
     app->bld_usb = gtk_check_button_new_with_label("USB console");
     app->bld_web = gtk_check_button_new_with_label("web (HTTPS)");
+    app->bld_ble = gtk_check_button_new_with_label("Bluetooth");
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_ble), TRUE); /* Blue default */
     gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_shell), TRUE);
     gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_net), TRUE);
     gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_color), TRUE);
@@ -599,6 +639,10 @@ GtkWidget *build_buildbar(App *app)
     gtk_widget_set_tooltip_text(app->bld_web,
         "cert-TLS HTTPS profile: TLS/crypto + HTTP + DNS + RTC time (forces BASIC "
         "on for HTTPGET$/BROWSE). Rides WiFi on RP2350W, or SLIP elsewhere.");
+    gtk_widget_set_tooltip_text(app->bld_ble,
+        "Apollo510 Blue only: build the EM9305 BLE radio + Nordic UART Service "
+        "+ the `ble` command (TIKU_DRV_BLE_EM9305_ENABLE=1). Run `ble uart` on "
+        "the board, then use the toolbar BLE button for a wireless shell.");
     gtk_box_append(GTK_BOX(frow), app->bld_shell);
     gtk_box_append(GTK_BOX(frow), app->bld_net);
     gtk_box_append(GTK_BOX(frow), app->bld_basic);
@@ -606,6 +650,7 @@ GtkWidget *build_buildbar(App *app)
     gtk_box_append(GTK_BOX(frow), app->bld_wifi);
     gtk_box_append(GTK_BOX(frow), app->bld_usb);
     gtk_box_append(GTK_BOX(frow), app->bld_web);
+    gtk_box_append(GTK_BOX(frow), app->bld_ble);
     /* keep the BASIC box in sync with web's forced-on coupling (see above) */
     g_signal_connect(app->bld_web, "toggled", G_CALLBACK(on_web_locks_basic), app);
     on_web_locks_basic(NULL, app);
@@ -636,10 +681,21 @@ void bld_debug_dump(App *app)
     fprintf(stderr, "[tikuconsole-dump] proj_dir = %s\n",
             app->proj_dir[0] ? app->proj_dir : "(NOT FOUND)");
     int idx = 0;
-    for (int i = 0; i < app->bld_nradios; i++) {
-        if (gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_radios[i]))) {
-            idx = i;
-            break;
+    /* TIKUCONSOLE_DUMP_BOARD=<key> dumps that board's flags (headless test); by
+     * default dump the currently-selected radio. */
+    const char *want = g_getenv("TIKUCONSOLE_DUMP_BOARD");
+    int found = 0;
+    if (want) {
+        for (int i = 0; i < N_BOARDS; i++) {
+            if (strcmp(BOARDS[i].key, want) == 0) { idx = i; found = 1; break; }
+        }
+    }
+    if (!found) {
+        for (int i = 0; i < app->bld_nradios; i++) {
+            if (gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_radios[i]))) {
+                idx = i;
+                break;
+            }
         }
     }
     bld_build_flags(app, &BOARDS[idx]);

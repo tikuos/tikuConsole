@@ -174,6 +174,7 @@ typedef struct App {
     GtkWidget   *bld_btn;
     GtkWidget   *bld_shell, *bld_net, *bld_basic, *bld_color, *bld_wifi, *bld_usb;
     GtkWidget   *bld_web;              /* web (HTTPS/TLS) firmware profile */
+    GtkWidget   *bld_ble;             /* Bluetooth (EM9305) -- Blue board only */
     GSubprocess *bld_proc;
     char         proj_dir[1024];       /* the tikuOS root (where make runs) */
     char         bld_board_key[32];
@@ -231,6 +232,7 @@ void gui_disconnect(App *app);            /* free the port before flashing */
 /* --- gui_build.c --- */
 GtkWidget *build_buildbar(App *app);
 void bld_autoselect(App *app);            /* select the attached board's family */
+void bld_update_ble_ui(App *app);         /* show BLE controls only for the Blue board */
 void bld_debug_dump(App *app);            /* smoke: print proj_dir + flags */
 
 /* --- gui_splash.c --- */
