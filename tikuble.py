@@ -3,8 +3,8 @@
 """
 tikuble.py - wireless tikuOS shell over Bluetooth Low Energy.
 
-A friendly terminal for the tikuOS shell exposed over the Nordic UART Service
-(NUS) by the Apollo510 Blue EVB (EM9305 radio). Run `ble uart` on the board,
+A friendly terminal for the tikuOS shell exposed over the BLE UART service
+(BLE UART) by the Apollo510 Blue EVB (EM9305 radio). Run `ble uart` on the board,
 then run this: it scans for the advertised name, connects, subscribes to the TX
 characteristic (device -> host notifications), and forwards your keystrokes to
 the RX characteristic (host -> device writes). It is the BLE transport twin of
@@ -26,17 +26,18 @@ import tty
 
 from bleak import BleakClient, BleakScanner
 
-# Nordic UART Service UUIDs (must match arch/ambiq/tiku_ble_nus.c on the device).
-NUS_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
-NUS_RX      = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  # host writes -> device in
-NUS_TX      = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"  # device notifies -> host
+# BLE UART service UUIDs -- the well-known Nordic UART Service UUIDs, so any
+# stock BLE-serial app works. Must match arch/ambiq/tiku_ble_uart.c on the device.
+UART_SVC = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
+UART_RX      = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  # host writes -> device in
+UART_TX      = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"  # device notifies -> host
 
 QUIT_KEY = 0x1D          # Ctrl-] leaves the session (Ctrl-C goes to the board)
 WRITE_CHUNK = 180        # keep a single GATT write within one ATT MTU
 
 
 async def find_device(name, address, timeout):
-    """Locate the board by explicit address, else by advertised name/NUS UUID."""
+    """Locate the board by explicit address, else by advertised name/BLE UART UUID."""
     if address:
         dev = await BleakScanner.find_device_by_address(address, timeout=timeout)
         if dev is None:
@@ -49,7 +50,7 @@ async def find_device(name, address, timeout):
         if d.name and want in d.name.lower():
             return True
         uuids = [u.lower() for u in (adv.service_uuids or [])]
-        return NUS_SERVICE in uuids
+        return UART_SVC in uuids
 
     print(f"tikuble: scanning for \"{name}\" (up to {timeout:.0f}s)...",
           file=sys.stderr)
@@ -61,7 +62,7 @@ async def find_device(name, address, timeout):
 
 
 async def run_session(dev):
-    """Bridge the local terminal to the board's NUS characteristics."""
+    """Bridge the local terminal to the board's BLE UART characteristics."""
     loop = asyncio.get_running_loop()
     outq = asyncio.Queue()
     done = loop.create_future()
@@ -84,7 +85,7 @@ async def run_session(dev):
     async with BleakClient(dev) as client:
         print(f"tikuble: connected to {dev.name or dev.address} "
               f"-- Ctrl-] to quit\r", file=sys.stderr)
-        await client.start_notify(NUS_TX, on_tx)
+        await client.start_notify(UART_TX, on_tx)
 
         loop.add_reader(sys.stdin.fileno(), on_stdin)
 
@@ -92,7 +93,7 @@ async def run_session(dev):
             while True:
                 data = await outq.get()
                 for i in range(0, len(data), WRITE_CHUNK):
-                    await client.write_gatt_char(NUS_RX, data[i:i + WRITE_CHUNK],
+                    await client.write_gatt_char(UART_RX, data[i:i + WRITE_CHUNK],
                                                  response=False)
 
         wtask = asyncio.ensure_future(writer())
@@ -104,7 +105,7 @@ async def run_session(dev):
             loop.remove_reader(sys.stdin.fileno())
             wtask.cancel()
             try:
-                await client.stop_notify(NUS_TX)
+                await client.stop_notify(UART_TX)
             except Exception:
                 pass
 
@@ -119,14 +120,14 @@ async def run_batch(dev, cmds, collect):
             sys.stdout.buffer.write(bytes(data))
             sys.stdout.buffer.flush()
 
-        await client.start_notify(NUS_TX, on_tx)
+        await client.start_notify(UART_TX, on_tx)
         await asyncio.sleep(1.0)                     # let the banner/prompt land
         for c in cmds:
-            await client.write_gatt_char(NUS_RX, (c + "\r").encode(),
+            await client.write_gatt_char(UART_RX, (c + "\r").encode(),
                                          response=False)
             await asyncio.sleep(collect)             # collect this cmd's output
         try:
-            await client.stop_notify(NUS_TX)
+            await client.stop_notify(UART_TX)
         except Exception:
             pass
     return 0

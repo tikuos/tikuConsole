@@ -1,6 +1,6 @@
 /*
  * TikuConsole -- macOS CoreBluetooth transport for the tikuOS wireless shell.
- * See ble_mac.h. Bridges a board's Nordic UART Service to a socket fd so the
+ * See ble_mac.h. Bridges a board's BLE UART service to a socket fd so the
  * GTK console drives it exactly like a serial port.
  *
  * SPDX-License-Identifier: Apache-2.0
@@ -15,10 +15,11 @@
 
 #include "ble_mac.h"
 
-/* Nordic UART Service (must match arch/ambiq/tiku_ble_nus.c on the device). */
-static NSString *const NUS_SVC = @"6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
-static NSString *const NUS_RX  = @"6E400002-B5A3-F393-E0A9-E50E24DCCA9E"; /* -> device */
-static NSString *const NUS_TX  = @"6E400003-B5A3-F393-E0A9-E50E24DCCA9E"; /* <- device */
+/* BLE UART service UUIDs -- the well-known Nordic UART Service UUIDs, so any
+ * stock BLE-serial app interoperates. Must match arch/ambiq/tiku_ble_uart.c. */
+static NSString *const UART_SVC = @"6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
+static NSString *const UART_RX  = @"6E400002-B5A3-F393-E0A9-E50E24DCCA9E"; /* -> device */
+static NSString *const UART_TX  = @"6E400003-B5A3-F393-E0A9-E50E24DCCA9E"; /* <- device */
 
 enum { ST_IDLE, ST_SCAN, ST_CONNECTING, ST_CONNECTED,
        ST_NORADIO, ST_NOTFOUND, ST_DISC };
@@ -32,7 +33,7 @@ static volatile int g_status = ST_IDLE;
 #define BLE_WRITE_CHUNK 180
 
 
-@interface BleNus : NSObject <CBCentralManagerDelegate, CBPeripheralDelegate>
+@interface BleUart : NSObject <CBCentralManagerDelegate, CBPeripheralDelegate>
 @property (strong) CBCentralManager  *central;
 @property (strong) CBPeripheral      *peer;
 @property (strong) CBCharacteristic  *rx;
@@ -44,10 +45,10 @@ static volatile int g_status = ST_IDLE;
 @end
 
 /* The single active link (one board at a time). */
-static BleNus *g_ble;
+static BleUart *g_ble;
 
 
-@implementation BleNus
+@implementation BleUart
 
 /* Radio state -> begin scanning, or fail out. */
 - (void)centralManagerDidUpdateState:(CBCentralManager *)c {
@@ -69,7 +70,7 @@ static BleNus *g_ble;
     NSString *nm = p.name ?: adv[CBAdvertisementDataLocalNameKey];
     BOOL match = (nm && [[nm lowercaseString] hasPrefix:self.want]);
     for (CBUUID *u in adv[CBAdvertisementDataServiceUUIDsKey]) {
-        if ([u isEqual:[CBUUID UUIDWithString:NUS_SVC]]) { match = YES; }
+        if ([u isEqual:[CBUUID UUIDWithString:UART_SVC]]) { match = YES; }
     }
     if (!match) { return; }
     [c stopScan];
@@ -81,13 +82,13 @@ static BleNus *g_ble;
 
 - (void)centralManager:(CBCentralManager *)c
   didConnectPeripheral:(CBPeripheral *)p {
-    [p discoverServices:@[[CBUUID UUIDWithString:NUS_SVC]]];
+    [p discoverServices:@[[CBUUID UUIDWithString:UART_SVC]]];
 }
 
 - (void)peripheral:(CBPeripheral *)p didDiscoverServices:(NSError *)err {
     for (CBService *s in p.services) {
-        [p discoverCharacteristics:@[[CBUUID UUIDWithString:NUS_RX],
-                                     [CBUUID UUIDWithString:NUS_TX]]
+        [p discoverCharacteristics:@[[CBUUID UUIDWithString:UART_RX],
+                                     [CBUUID UUIDWithString:UART_TX]]
                         forService:s];
     }
 }
@@ -96,9 +97,9 @@ static BleNus *g_ble;
 didDiscoverCharacteristicsForService:(CBService *)s
              error:(NSError *)err {
     for (CBCharacteristic *ch in s.characteristics) {
-        if ([ch.UUID isEqual:[CBUUID UUIDWithString:NUS_RX]]) {
+        if ([ch.UUID isEqual:[CBUUID UUIDWithString:UART_RX]]) {
             self.rx = ch;
-        } else if ([ch.UUID isEqual:[CBUUID UUIDWithString:NUS_TX]]) {
+        } else if ([ch.UUID isEqual:[CBUUID UUIDWithString:UART_TX]]) {
             self.tx = ch;
             [p setNotifyValue:YES forCharacteristic:ch];   /* subscribe */
         }
@@ -140,9 +141,9 @@ didFailToConnectPeripheral:(CBPeripheral *)p error:(NSError *)err {
 - (void)startRxForwarding {
     self.rxSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ,
                                            (uintptr_t)self.ifd, 0, self.q);
-    __weak BleNus *weak = self;
+    __weak BleUart *weak = self;
     dispatch_source_set_event_handler(self.rxSource, ^{
-        BleNus *self2 = weak;
+        BleUart *self2 = weak;
         if (!self2) { return; }
         uint8_t buf[512];
         ssize_t nr = read(self2.ifd, buf, sizeof(buf));
@@ -187,7 +188,7 @@ int ble_mac_open(const char *name) {
     fcntl(sv[1], F_SETFL, O_NONBLOCK);          /* internal end */
 
     g_status = ST_IDLE;
-    BleNus *b = [BleNus new];
+    BleUart *b = [BleUart new];
     b.want = (name && *name) ? [[NSString stringWithUTF8String:name] lowercaseString]
                              : @"tikuos";
     b.ifd = sv[1];
@@ -198,7 +199,7 @@ int ble_mac_open(const char *name) {
 }
 
 void ble_mac_close(void) {
-    BleNus *b = g_ble;
+    BleUart *b = g_ble;
     g_ble = nil;
     if (!b) { return; }
     dispatch_async(b.q, ^{ [b teardown]; });

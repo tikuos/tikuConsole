@@ -1,8 +1,8 @@
 /*
  * TikuConsole -- macOS CoreBluetooth transport for the tikuOS wireless shell.
  *
- * Presents a board's Nordic UART Service (NUS, exposed by the Apollo510 Blue
- * EVB's `ble uart` command) to the GTK console as an ordinary file
+ * Presents a board's BLE UART service (exposed by the Apollo510 Blue EVB's
+ * `ble uart` command) to the GTK console as an ordinary file
  * descriptor: bytes the device notifies on the TX characteristic become
  * readable on the fd, and bytes written to the fd are forwarded to the RX
  * characteristic. The GUI can then drive a BLE link through the exact same
@@ -19,7 +19,7 @@
 #define BLE_MAC_H
 
 /*
- * Start scanning for a NUS peripheral whose advertised name begins with
+ * Start scanning for a BLE UART peripheral whose advertised name begins with
  * @p name (NULL -> "tikuOS"), connect, and bridge it to a socket fd.
  *
  * Returns a non-blocking fd the caller reads/writes like a serial port, or -1
