@@ -28,6 +28,7 @@
 #include "bridge.h"
 #include "gui.h"
 #include "ports.h"
+#include "ble_mac.h"
 
 static void teardown(App *app);
 
@@ -649,6 +650,38 @@ static void do_connect(App *app)
     }
 }
 
+/* Connect over BLE (CoreBluetooth) instead of a serial port: the Nordic UART
+ * Service is bridged to a socket fd (ble_mac.m) that we drive through the exact
+ * same console path as a serial link. */
+static void do_connect_ble(App *app)
+{
+    if (app->ser_fd >= 0) {                 /* already connected -> disconnect */
+        teardown(app);
+        return;
+    }
+    int fd = ble_mac_open("tikuOS");
+    if (fd < 0) {
+        set_status(app, "BLE: could not start CoreBluetooth "
+                        "(is Bluetooth on / permitted?)", TRUE);
+        return;
+    }
+    app->ser_fd = fd;
+    app->ble_on = TRUE;
+    app->utf8_carry_n = 0;
+    app->ser_watch = g_unix_fd_add(fd, G_IO_IN, on_serial_io, app);
+    gtk_button_set_label(GTK_BUTTON(app->connect_btn), "Disconnect");
+    gtk_button_set_label(GTK_BUTTON(app->ble_btn), "BLE \xe2\x9c\x95");  /* ✕ */
+    gtk_widget_remove_css_class(GTK_WIDGET(app->cview), "console-off");
+    update_leds(app);
+    set_status(app, "BLE: scanning for \"tikuOS\" over the Nordic UART Service…",
+               FALSE);
+    static const char *hello =
+        "[tikuconsole] BLE -- connecting to \"tikuOS\" over the "
+        "Nordic UART Service…\n";
+    console_append(app, hello, (int)strlen(hello));
+    gtk_widget_grab_focus(GTK_WIDGET(app->cview));
+}
+
 static void teardown(App *app)
 {
     if (app->ser_watch) {
@@ -657,6 +690,13 @@ static void teardown(App *app)
     }
     net_down(app);
     ping_cancel(app);
+    if (app->ble_on) {                      /* tear down the CoreBluetooth link */
+        ble_mac_close();
+        app->ble_on = FALSE;
+        if (app->ble_btn) {
+            gtk_button_set_label(GTK_BUTTON(app->ble_btn), "BLE");
+        }
+    }
     if (app->ser_fd >= 0) {
         close(app->ser_fd);
         app->ser_fd = -1;
@@ -777,6 +817,12 @@ static void on_connect_clicked(GtkButton *b, gpointer user)
 {
     (void)b;
     do_connect((App *)user);
+}
+
+static void on_ble_clicked(GtkButton *b, gpointer user)
+{
+    (void)b;
+    do_connect_ble((App *)user);
 }
 
 static void on_files_clicked(GtkButton *b, gpointer user)
@@ -1004,6 +1050,12 @@ static void activate(GtkApplication *gapp, gpointer user)
         "Browse and transfer files in the device's /data store");
     g_signal_connect(app->files_btn, "clicked", G_CALLBACK(on_files_clicked), app);
     gtk_box_append(GTK_BOX(bar), app->files_btn);
+    app->ble_btn = gtk_button_new_with_label("BLE");
+    gtk_widget_set_tooltip_text(app->ble_btn,
+        "Connect to a board's wireless shell over Bluetooth LE "
+        "(Nordic UART Service); run `ble uart` on the board first");
+    g_signal_connect(app->ble_btn, "clicked", G_CALLBACK(on_ble_clicked), app);
+    gtk_box_append(GTK_BOX(bar), app->ble_btn);
     app->connect_btn = gtk_button_new_with_label("Connect");
     gtk_widget_add_css_class(app->connect_btn, "suggested-action");
     gtk_widget_set_hexpand(app->connect_btn, TRUE);

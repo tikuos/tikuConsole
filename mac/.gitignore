@@ -2,4 +2,5 @@
 /slmux
 /tikuconsole
 /fstest
+/ble_test
 *.o
