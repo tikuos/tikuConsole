@@ -42,7 +42,9 @@ typedef struct {
 } board_t;
 
 static const board_t BOARDS[] = {
-    {"msp430fr5969", "msp430fr5969", "msp430", 9600,   "MSP430",       "FR5969"},
+    /* FR5969 (64 KB) + smaller MSP430 parts dropped: TikuOS core (kernel +
+     * VFS) no longer fits their small-model FRAM.  Supported MSP430 =
+     * FR5994 / FR6989.  Arch code stays in the tikuOS tree for reference. */
     {"msp430fr5994", "msp430fr5994", "msp430", 9600,   "MSP430",       "FR5994"},
     {"msp430fr6989", "msp430fr6989", "msp430", 9600,   "MSP430",       "FR6989"},
     {"apollo510",    "apollo510",    "ambiq",  115200, "Apollo",       "Apollo510"},
