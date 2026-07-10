@@ -26,15 +26,54 @@ from tcon.ports import identify_port, scan_ports  # noqa: E402
 class ConnectionMixin:
     # ---- port detection ---------------------------------------------------
     def refresh_ports(self, *a):
+        prev = getattr(self, "port_path", None)    # the user's current pick
         self.ports = scan_ports()
         labels = [self._port_label(p) for p in self.ports] or ["(no USB serial ports)"]
         self.port_dd.set_model(Gtk.StringList.new(labels))
-        sel = 0
-        for i, p in enumerate(self.ports):         # prefer a recognised board
-            if identify_port(p)[0] != "unknown":
-                sel = i; break
-        self.port_dd.set_selected(sel)
+        self.port_dd.set_selected(self._preferred_port_index(prev))
         self.on_port_changed()
+
+    def _preferred_port_index(self, prev):
+        """Which port to select after a rescan.
+
+        Preserve the user's current pick if that device is still attached, so
+        a rescan (startup, the Refresh button, the post-flash autoconnect
+        poll) can never yank the selection away mid-session.  Only auto-pick on
+        first populate or when the selected port vanished -- and then prefer a
+        plain console UART (FT232) over a debug-probe VCOM (the MSP430 eZ-FET,
+        which is flashing-only and resets the target on open)."""
+        if prev:                                   # keep the current selection
+            for i, p in enumerate(self.ports):
+                if p.device == prev:
+                    return i
+        fallback = None
+        for i, p in enumerate(self.ports):         # else auto-pick
+            plat = identify_port(p)[0]
+            if plat == "unknown":
+                continue
+            if fallback is None:
+                fallback = i                       # first recognised = backup
+            if "eZ-FET" not in plat:               # prefer a real console UART
+                return self._console_acm_index(i)
+        return fallback if fallback is not None else 0
+
+    def _console_acm_index(self, i):
+        """Redirect a J-Link probe's first VCOM to its console VCOM.
+
+        A SEGGER J-Link (Apollo, nRF54L15-DK) exposes two CDC-ACM nodes with
+        the same USB serial: ttyACM0 is the debugger's own CDC, ttyACM1 is the
+        target's UART console.  self.ports is sorted by device name, so among
+        the ACMs of this probe the SECOND one is the console -- prefer it.  For
+        a single-ACM probe (or an FT232 ttyUSB) this is a no-op.
+        """
+        p = self.ports[i]
+        sn = getattr(p, "serial_number", None)
+        if not sn or "ttyACM" not in p.device:
+            return i
+        group = [j for j, q in enumerate(self.ports)
+                 if getattr(q, "serial_number", None) == sn
+                 and "ttyACM" in q.device]
+        return group[1] if len(group) >= 2 else i
 
     @staticmethod
     def _port_label(p):
@@ -49,8 +88,9 @@ class ConnectionMixin:
             self.port_path = p.device
             self.platform_lbl.set_text(plat)
             self.set_wifi_pane_visible(plat)
-            if self.ser is None:                   # don't fight a live session
-                self.baud.set_text(str(baud))
+            if self.ser is None and not getattr(self, "_bld_baud_sticky", False):
+                self.baud.set_text(str(baud))      # don't fight a live session
+                                                   # or a just-built baud
         else:
             self.port_path = None
             self.platform_lbl.set_text("--")

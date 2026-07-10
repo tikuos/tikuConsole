@@ -10,9 +10,18 @@ SPDX-License-Identifier: Apache-2.0
 """
 
 # Platform fingerprints: (vid, pid|None, label, default baud).  First match wins.
+#
+# SEGGER J-Link probes (VID 0x1366) can't be told fully apart by USB id -- the
+# nRF54L15-DK and every Apollo EVB share the vendor, and the nRF54L15-DK's OB
+# J-Link enumerates as 0x1366:0x1069.  We list that specific pid before the
+# Apollo wildcard so a DK is labelled correctly; if a particular Apollo board is
+# ever seen with the same pid it would need its own specific entry above this.
+# Either way the baud (115200) and the second-ACM console rule are identical, so
+# a mislabel would be cosmetic only.
 _USB_IDS = [
     (0x2E8A, 0x0009, "RP2350 (USB CDC)", 115200),
     (0x2E8A, None,   "RP2040/RP2350",    115200),
+    (0x1366, 0x1069, "nRF54L15-DK (J-Link)", 115200),
     (0x1366, None,   "Apollo (J-Link VCOM)", 115200),
     (0x0451, None,   "MSP430 (eZ-FET)",  9600),
     (0x0403, 0x6001, "MSP430 (FT232)",   9600),
