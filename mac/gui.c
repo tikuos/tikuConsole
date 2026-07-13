@@ -998,6 +998,19 @@ static void make_console_tags(App *app)
     g_timeout_add(530, cursor_blink_cb, app);   /* blink the block cursor */
 }
 
+/* Copy the entire console + build/flash log to the system clipboard. */
+static void on_copy_log_clicked(GtkButton *b, gpointer user)
+{
+    App *app = (App *)user;
+    GtkTextIter s, e;
+    char *text;
+
+    gtk_text_buffer_get_bounds(app->cbuf, &s, &e);
+    text = gtk_text_buffer_get_text(app->cbuf, &s, &e, FALSE);
+    gdk_clipboard_set_text(gtk_widget_get_clipboard(GTK_WIDGET(b)), text);
+    g_free(text);
+}
+
 static gboolean smoke_quit(gpointer user)
 {
     g_application_quit(G_APPLICATION(((App *)user)->app));
@@ -1098,6 +1111,11 @@ static void activate(GtkApplication *gapp, gpointer user)
     g_signal_connect(app->ble_btn, "clicked", G_CALLBACK(on_ble_clicked), app);
     gtk_box_append(GTK_BOX(bar), app->ble_btn);
     gtk_widget_set_visible(app->ble_btn, FALSE);  /* Blue board only (build bar) */
+    GtkWidget *copy_btn = gtk_button_new_with_label("Copy log");
+    gtk_widget_set_tooltip_text(copy_btn,
+        "Copy the whole console + build/flash log to the clipboard");
+    g_signal_connect(copy_btn, "clicked", G_CALLBACK(on_copy_log_clicked), app);
+    gtk_box_append(GTK_BOX(bar), copy_btn);
     app->connect_btn = gtk_button_new_with_label("Connect");
     gtk_widget_add_css_class(app->connect_btn, "suggested-action");
     gtk_widget_set_hexpand(app->connect_btn, TRUE);
