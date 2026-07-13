@@ -33,6 +33,7 @@ static const struct {
 } IDS[] = {
     {0x2E8A, 0x0009, "RP2350 (USB CDC)",     115200},
     {0x2E8A, -1,     "RP2040/RP2350",        115200},
+    {0x1366, 0x1069, "nRF54L15-DK (J-Link)", 115200},
     {0x1366, -1,     "Apollo (J-Link VCOM)", 115200},
     {0x0451, -1,     "MSP430 (eZ-FET)",        9600},
     {0x0403, 0x6001, "MSP430 (FT232)",         9600},
@@ -91,27 +92,35 @@ static int read_int_prop(io_registry_entry_t node, CFStringRef key, int *out)
     return ok;
 }
 
+static void read_string_prop(io_registry_entry_t node, CFStringRef key,
+                             char *out, size_t osz)
+{
+    CFTypeRef value = IORegistryEntryCreateCFProperty(
+        node, key, kCFAllocatorDefault, 0);
+    if (value) {
+        if (CFGetTypeID(value) == CFStringGetTypeID()) {
+            CFStringGetCString((CFStringRef)value, out, (CFIndex)osz,
+                               kCFStringEncodingUTF8);
+        }
+        CFRelease(value);
+    }
+}
+
 /* Walk up the IOService tree from a serial node, filling vid/pid/product from
  * the first USB device ancestor that carries them. */
 static void usb_ancestry(io_registry_entry_t svc, int *vid, int *pid,
-                         char *prod, size_t psz)
+                         char *prod, size_t psz, char *serial, size_t ssz)
 {
     *vid = *pid = -1;
     prod[0] = 0;
+    serial[0] = 0;
     io_registry_entry_t node = svc;
     IOObjectRetain(node);
     for (int depth = 0; depth < 8 && node; depth++) {
         if (read_int_prop(node, CFSTR("idVendor"), vid) &&
             read_int_prop(node, CFSTR("idProduct"), pid)) {
-            CFTypeRef nm = IORegistryEntryCreateCFProperty(
-                node, CFSTR("USB Product Name"), kCFAllocatorDefault, 0);
-            if (nm) {
-                if (CFGetTypeID(nm) == CFStringGetTypeID()) {
-                    CFStringGetCString((CFStringRef)nm, prod, (CFIndex)psz,
-                                       kCFStringEncodingUTF8);
-                }
-                CFRelease(nm);
-            }
+            read_string_prop(node, CFSTR("USB Product Name"), prod, psz);
+            read_string_prop(node, CFSTR("USB Serial Number"), serial, ssz);
             IOObjectRelease(node);
             return;
         }
@@ -159,12 +168,14 @@ int ports_scan(port_info_t *out, int max)
         /* Keep only USB serial callout nodes; skip Bluetooth / debug consoles. */
         if (strstr(dev, "/cu.usbmodem") || strstr(dev, "/cu.usbserial")) {
             int vid, pid;
-            char prod[128];
-            usb_ancestry(svc, &vid, &pid, prod, sizeof(prod));
+            char prod[128], serial[128];
+            usb_ancestry(svc, &vid, &pid, prod, sizeof(prod),
+                         serial, sizeof(serial));
             port_info_t *pi = &out[count++];
             strlcpy(pi->device, dev, sizeof(pi->device));
             pi->vid = vid;
             pi->pid = pid;
+            strlcpy(pi->serial, serial, sizeof(pi->serial));
             fingerprint(vid, pid, prod, pi->label, sizeof(pi->label), &pi->baud);
         }
         IOObjectRelease(svc);

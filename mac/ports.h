@@ -19,12 +19,13 @@
 typedef struct {
     char     device[256]; /* /dev/cu.usbmodemXXXX */
     char     label[64];   /* platform fingerprint, e.g. "Apollo (J-Link VCOM)" */
+    char     serial[128]; /* USB probe serial, used to pair J-Link VCOMs */
     unsigned baud;        /* default baud for this platform */
     int      vid, pid;    /* USB ids, or -1 if unknown */
 } port_info_t;
 
 /* Scan USB serial ports; fill out[] (up to max entries) and return the count.
- * Recognised boards (Apollo / MSP430 / RP2350) sort ahead of unknown ones. */
+ * Recognised boards (Apollo / Nordic / MSP430 / RP2350) sort ahead of unknown. */
 int ports_scan(port_info_t *out, int max);
 
 #endif /* TIKUCONSOLE_PORTS_H */

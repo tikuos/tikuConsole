@@ -768,6 +768,30 @@ static void port_changed_core(App *app)
     }
 }
 
+/* A J-Link exposes debugger and target-console VCOMs under the same USB
+ * serial.  The second callout is the target UART on Apollo and nRF54L15. */
+static int console_vcom_index(App *app, int candidate)
+{
+    if (candidate < 0 || candidate >= app->n_ports ||
+        app->ports[candidate].vid != 0x1366) {
+        return candidate;
+    }
+    int found = 0;
+    for (int i = 0; i < app->n_ports; i++) {
+        gboolean same = app->ports[i].vid == 0x1366;
+        if (app->ports[candidate].serial[0]) {
+            same = same && strcmp(app->ports[i].serial,
+                                  app->ports[candidate].serial) == 0;
+        } else {
+            same = same && app->ports[i].pid == app->ports[candidate].pid;
+        }
+        if (same && ++found == 2) {
+            return i;
+        }
+    }
+    return candidate;
+}
+
 static void on_port_changed(GObject *o, GParamSpec *ps, gpointer user)
 {
     (void)o;
@@ -777,6 +801,8 @@ static void on_port_changed(GObject *o, GParamSpec *ps, gpointer user)
 
 static void refresh_ports(App *app)
 {
+    char previous[sizeof(app->port_path)];
+    strlcpy(previous, app->port_path, sizeof(previous));
     app->n_ports = ports_scan(app->ports, PORTS_MAX);
     GtkStringList *sl = gtk_string_list_new(NULL);
     if (app->n_ports == 0) {
@@ -795,14 +821,29 @@ static void refresh_ports(App *app)
     gtk_drop_down_set_model(GTK_DROP_DOWN(app->port_dd), G_LIST_MODEL(sl));
     g_object_unref(sl);
 
-    guint sel = 0;
-    for (int i = 0; i < app->n_ports; i++) {
-        if (strcmp(app->ports[i].label, "unknown") != 0) {  /* prefer a board */
-            sel = (guint)i;
-            break;
+    int selected = -1;
+    if (previous[0]) {
+        for (int i = 0; i < app->n_ports; i++) {
+            if (strcmp(app->ports[i].device, previous) == 0) {
+                selected = i;                    /* never yank a live choice */
+                break;
+            }
         }
     }
-    gtk_drop_down_set_selected(GTK_DROP_DOWN(app->port_dd), sel);
+    if (selected < 0) {
+        for (int i = 0; i < app->n_ports; i++) {
+            if (strcmp(app->ports[i].label, "unknown") != 0 &&
+                strstr(app->ports[i].label, "eZ-FET") == NULL) {
+                selected = console_vcom_index(app, i);
+                break;
+            }
+        }
+    }
+    if (selected < 0 && app->n_ports > 0) {
+        selected = 0;
+    }
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(app->port_dd),
+                               selected >= 0 ? (guint)selected : 0);
     port_changed_core(app);
     bld_autoselect(app);            /* re-detect the board's MCU family too */
 }
@@ -1116,7 +1157,7 @@ static void activate(GtkApplication *gapp, gpointer user)
     g_timeout_add(500, net_counters_tick, app);
     refresh_ports(app);
     update_leds(app);
-    bld_update_ble_ui(app);         /* BLE controls: Blue board only */
+    bld_update_ble_ui(app);         /* board-specific firmware controls */
 
     const char *smoke = g_getenv("TIKUCONSOLE_SMOKE_MS");
     gboolean force_splash = g_getenv("TIKUCONSOLE_FORCE_SPLASH") != NULL;

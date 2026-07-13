@@ -17,6 +17,9 @@ sudo apt install python3-gi gir1.2-gtk-4.0 python3-serial
 ```
 
 A TikuOS board built with the net stack (`slip`/`ping`) on the other end.
+The firmware bar discovers the canonical board list from the sibling
+`TikuBench` checkout and supports MSP430 FR5994/FR6989, RP2350, Apollo4/510,
+Apollo510 Blue, and nRF54L15-DK builds.
 
 ## Run
 
@@ -24,6 +27,10 @@ A TikuOS board built with the net stack (`slip`/`ping`) on the other end.
 python3 tikuconsole.py          # plain console + rootless ping — no root needed
 sudo python3 tikuconsole.py     # also enables the host TUN/NAT bridge
 ```
+
+Build and flash subprocesses are automatically returned to `SUDO_USER`, so
+using `sudo` for TUN/NAT does not create root-owned firmware artifacts or hide
+per-user toolchains and nrfutil plugins.
 
 1. Plug in a board — the port, platform and baud auto-fill. Click **Connect**.
 2. Type into the console.
@@ -38,6 +45,18 @@ sudo python3 tikuconsole.py     # also enables the host TUN/NAT bridge
 TIKUCONSOLE_SCAN=1     python3 tikuconsole.py   # list ports + guesses, then exit
 TIKUCONSOLE_SMOKE_MS=1200 python3 tikuconsole.py # build the window, quit (CI smoke)
 TIKUCONSOLE_NO_SPLASH=1 python3 tikuconsole.py  # skip the splash screen
+```
+
+The build bar exposes only features supported by the selected board: RP2350
+WiFi/USB/Bluetooth, Apollo510 Blue BLE, HTTPS on Cortex-M boards, and nRF54L15
+CRACEN public-key and FLPR options. Network/radio profiles visibly force the
+shell dependency, and the selected toolbar baud is used for both firmware and
+the post-flash reconnect.
+
+Command construction and Linux/macOS board parity can be checked headlessly:
+
+```bash
+python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
 The board's IP defaults to **172.16.7.2** (host **172.16.7.1**); set it on the

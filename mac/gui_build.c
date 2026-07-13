@@ -35,7 +35,7 @@
 typedef struct {
     const char *key;       /* TikuBench board key / make MCU= value */
     const char *mcu;
-    const char *family;    /* "msp430" | "rp2350" | "ambiq" */
+    const char *family;    /* "msp430" | "rp2350" | "ambiq" | "nordic" */
     int         baud;
     const char *fam_disp;  /* subcategory header, e.g. "MSP430" */
     const char *var_disp;  /* variant radio label, e.g. "FR5994" */
@@ -52,6 +52,7 @@ static const board_t BOARDS[] = {
     {"apollo4l",     "apollo4l",     "ambiq",  115200, "Apollo",       "Apollo4 Lite"},
     {"apollo4p",     "apollo4p",     "ambiq",  115200, "Apollo",       "Apollo4 Plus"},
     {"rp2350",       "rp2350",       "rp2350", 115200, "Raspberry Pi", "RP2350"},
+    {"nrf54l15",     "nrf54l15",     "nordic", 115200, "Nordic",       "nRF54L15 DK"},
 };
 #define N_BOARDS ((int)(sizeof(BOARDS) / sizeof(BOARDS[0])))
 
@@ -61,6 +62,7 @@ static void bld_on_exit(GObject *src, GAsyncResult *res, gpointer user);
 static void bld_done(App *app, gboolean ok);
 static gboolean bld_autoconnect(gpointer user);
 static void on_build_flash(GtkButton *btn, gpointer user);
+static void on_feature_dependency(GtkCheckButton *unused, gpointer user);
 
 /* ------------------------------------------------------------------------- */
 /* Locate the tikuOS root (where make runs)                                  */
@@ -138,9 +140,20 @@ static void bld_free_flags(App *app)
     app->bld_nflag = 0;
 }
 
-#define BLD_ADD(app, s) \
-    do { if ((app)->bld_nflag < 38) \
-            (app)->bld_flagv[(app)->bld_nflag++] = g_strdup(s); } while (0)
+static void bld_add(App *app, const char *value)
+{
+    for (int i = 0; i < app->bld_nflag; i++) {
+        if (strcmp(app->bld_flagv[i], value) == 0) {
+            return;
+        }
+    }
+    if (app->bld_nflag < (int)(sizeof(app->bld_flagv) /
+                               sizeof(app->bld_flagv[0]))) {
+        app->bld_flagv[app->bld_nflag++] = g_strdup(value);
+    }
+}
+
+#define BLD_ADD(app, s) bld_add((app), (s))
 
 /* Translate the MCU + feature checkboxes into make variables.  Features whose
  * Makefile default can be ON -- shell (always) and BASIC (defaults ON on
@@ -155,18 +168,24 @@ static void bld_build_flags(App *app, const board_t *b)
     gboolean color = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_color));
     gboolean web   = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_web));
     gboolean is_rp = (strcmp(b->family, "rp2350") == 0);
+    gboolean is_nordic = (strcmp(b->family, "nordic") == 0);
+    gboolean is_blue = (strcmp(b->key, "apollo510b") == 0);
     gboolean wifi  = is_rp &&
                      gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_wifi));
     gboolean usb   = is_rp &&
                      gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_usb));
-    /* The EM9305 BLE radio exists only on the Apollo510 Blue EVB. */
-    gboolean ble   = (strcmp(b->key, "apollo510b") == 0) &&
+    gboolean bt    = (is_rp || is_blue) &&
                      gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_ble));
+    gboolean pkhw  = is_nordic &&
+                     gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_pkhw));
+    gboolean flpr  = is_nordic &&
+                     gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_flpr));
 
     BLD_ADD(app, "HAS_TESTS=0");
     BLD_ADD(app, "HAS_EXAMPLES=0");
-    /* BLE needs the shell (the `ble` command + wireless-shell backend live there). */
-    BLD_ADD(app, (shell || ble) ? "TIKU_SHELL_ENABLE=1" : "TIKU_SHELL_ENABLE=0");
+    /* Network/radio/coprocessor profiles are controlled through the shell. */
+    BLD_ADD(app, (shell || net || wifi || web || bt || flpr)
+                 ? "TIKU_SHELL_ENABLE=1" : "TIKU_SHELL_ENABLE=0");
     /* web/HTTPS needs BASIC -- HTTPGET$/HTTPSTATUS/BROWSE live in the interpreter */
     BLD_ADD(app, (basic || web) ? "TIKU_SHELL_BASIC_ENABLE=1"
                                 : "TIKU_SHELL_BASIC_ENABLE=0");
@@ -187,6 +206,10 @@ static void bld_build_flags(App *app, const board_t *b)
             BLD_ADD(app, "TIKU_DRV_WIFI_CYW43_ENABLE=1");
             BLD_ADD(app, "TIKU_KITS_NET_WIFI_ENABLE=1");
             BLD_ADD(app, "TIKU_KITS_NET_DHCP_ENABLE=1");
+        }
+        if (is_nordic) {
+            /* Match TikuBench's Nordic HTTPS worker/offload profile. */
+            BLD_ADD(app, "TIKU_THREADS_ENABLE=1");
         }
     } else if (wifi) {
         /* RP2350W: the HW-verified lean WiFi profile -- CYW43 driver + the
@@ -219,8 +242,20 @@ static void bld_build_flags(App *app, const board_t *b)
     if (usb) {
         BLD_ADD(app, "TIKU_CONSOLE=usb");
     }
-    if (ble) {
-        BLD_ADD(app, "TIKU_DRV_BLE_EM9305_ENABLE=1");
+    if (bt) {
+        if (is_rp) {
+            BLD_ADD(app, "TIKU_DRV_WIFI_CYW43_ENABLE=1");
+            BLD_ADD(app, "TIKU_DRV_WIFI_CYW43_BT_ENABLE=1");
+        } else {
+            BLD_ADD(app, "TIKU_DRV_BLE_EM9305_ENABLE=1");
+        }
+    }
+    if (pkhw) {
+        BLD_ADD(app, "TIKU_CRACEN_PK_ENABLE=1");
+        BLD_ADD(app, "TIKU_KIT_CRYPTO_ENABLE=1");
+    }
+    if (flpr) {
+        BLD_ADD(app, "TIKU_FLPR_ENABLE=1");
     }
     char tmp[64];
     snprintf(tmp, sizeof(tmp), "MCU=%s", b->mcu);
@@ -242,16 +277,28 @@ static void bld_profile(App *app, const board_t *b, char *out, size_t len)
     /* On RP2350 'wifi' supersedes 'net'; elsewhere the WiFi/USB boxes have no
      * effect so they never appear in the profile label. */
     gboolean web_on = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_web));
-    gboolean ble_on = (strcmp(b->key, "apollo510b") == 0) &&
+    gboolean bt_on = (is_rp || strcmp(b->key, "apollo510b") == 0) &&
         gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_ble));
+    gboolean pkhw_on = (strcmp(b->family, "nordic") == 0) &&
+        gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_pkhw));
+    gboolean flpr_on = (strcmp(b->family, "nordic") == 0) &&
+        gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_flpr));
+    gboolean net_on = !wifi_on && !web_on &&
+        gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_net));
+    gboolean shell_on =
+        gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_shell)) ||
+        net_on || wifi_on || web_on || bt_on || flpr_on;
+    gboolean basic_on = web_on ||
+        gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_basic));
     const struct { gboolean on; const char *n; } F[] = {
-        { gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_shell)), "shell" },
-        { ble_on,                                                        "ble"   },
+        { shell_on,                                                       "shell" },
+        { bt_on, is_rp ? "bt" : "ble" },
+        { flpr_on,                                                       "flpr"  },
+        { pkhw_on,                                                       "pk-hw" },
         { web_on,                                                        "web"   },
         { wifi_on && !web_on,                                            "wifi"  },
-        { !wifi_on && !web_on &&
-          gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_net)),   "net"   },
-        { gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_basic)), "BASIC" },
+        { net_on,                                                        "net"   },
+        { basic_on,                                                      "BASIC" },
         { gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_color)), "colour"},
     };
     out[0] = '\0';
@@ -320,6 +367,16 @@ static void bld_run_step(App *app)
         return;
     }
     GPtrArray *a = g_ptr_array_new_with_free_func(g_free);
+    /* TUN/NAT may require launching the app with sudo, but make must run as
+     * the invoking user.  This keeps build products user-owned and lets tools
+     * such as nrfutil resolve their per-user plugins naturally. */
+    const char *sudo_user = g_getenv("SUDO_USER");
+    if (geteuid() == 0 && sudo_user && *sudo_user) {
+        g_ptr_array_add(a, g_strdup("sudo"));
+        g_ptr_array_add(a, g_strdup("-u"));
+        g_ptr_array_add(a, g_strdup(sudo_user));
+        g_ptr_array_add(a, g_strdup("-H"));
+    }
     g_ptr_array_add(a, g_strdup("make"));
     if (app->bld_step == 0) {
         g_ptr_array_add(a, g_strdup("clean"));
@@ -475,19 +532,50 @@ static const board_t *bld_selected_board(App *app)
     return NULL;
 }
 
-/* The EM9305 radio is unique to the Apollo510 Blue EVB, so the "Bluetooth"
- * build box and the toolbar "BLE" connect button only make sense there. Keep
- * the button visible during a live BLE session so it can still disconnect. */
+/* Refresh controls whose meaning depends on the selected board. */
 void bld_update_ble_ui(App *app)
 {
     const board_t *b = bld_selected_board(app);
     gboolean is_blue = (b != NULL && strcmp(b->key, "apollo510b") == 0);
+    gboolean is_rp = (b != NULL && strcmp(b->family, "rp2350") == 0);
+    gboolean is_nordic = (b != NULL && strcmp(b->family, "nordic") == 0);
+    gboolean web_ok = (b != NULL && strcmp(b->family, "msp430") != 0);
+    if (app->bld_wifi) {
+        gtk_widget_set_sensitive(app->bld_wifi, is_rp);
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_wifi), is_rp);
+    }
+    if (app->bld_usb) {
+        gtk_widget_set_sensitive(app->bld_usb, is_rp);
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_usb), is_rp);
+    }
+    if (app->bld_web) {
+        gtk_widget_set_sensitive(app->bld_web, web_ok);
+        if (!web_ok) {
+            gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_web), FALSE);
+        }
+    }
     if (app->bld_ble) {
-        gtk_widget_set_visible(app->bld_ble, is_blue);
+        gtk_widget_set_sensitive(app->bld_ble, is_blue || is_rp);
+        if (!is_blue && !is_rp) {
+            gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_ble), FALSE);
+        }
+    }
+    if (app->bld_pkhw) {
+        gtk_widget_set_sensitive(app->bld_pkhw, is_nordic);
+        if (!is_nordic) {
+            gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_pkhw), FALSE);
+        }
+    }
+    if (app->bld_flpr) {
+        gtk_widget_set_sensitive(app->bld_flpr, is_nordic);
+        if (!is_nordic) {
+            gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_flpr), FALSE);
+        }
     }
     if (app->ble_btn) {
         gtk_widget_set_visible(app->ble_btn, is_blue || app->ble_on);
     }
+    on_feature_dependency(NULL, app);
 }
 
 /* A user toggling an MCU stops auto-select from overriding their choice. */
@@ -497,10 +585,11 @@ static void on_mcu_toggled(GtkCheckButton *rb, gpointer user)
     if (app->bld_set_programmatic) {
         return;                                /* our own set_active, not a click */
     }
-    if (gtk_check_button_get_active(rb)) {
-        app->bld_user_picked = TRUE;
+    if (!gtk_check_button_get_active(rb)) {
+        return;
     }
-    bld_update_ble_ui(app);                    /* show/hide BLE controls */
+    app->bld_user_picked = TRUE;
+    bld_update_ble_ui(app);
 }
 
 /* Auto-select the MCU family of a currently-attached board.  Detection is
@@ -526,6 +615,8 @@ void bld_autoselect(App *app)
         const char *key = NULL;
         if (strstr(plat, "apollo")) {
             key = "apollo510";                 /* family default (510 vs 4 Lite) */
+        } else if (strstr(plat, "nrf54") || strstr(plat, "nordic")) {
+            key = "nrf54l15";
         } else if (strstr(plat, "rp2") || strstr(plat, "pico")) {
             key = "rp2350";
         } else if (strstr(plat, "msp")) {
@@ -560,6 +651,23 @@ static void on_web_locks_basic(GtkCheckButton *web, gpointer ud)
         gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_basic), TRUE);
     gtk_widget_set_sensitive(app->bld_basic, !on);
     (void)web;
+}
+
+static void on_feature_dependency(GtkCheckButton *unused, gpointer ud)
+{
+    App *app = ud;
+    gboolean wifi = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_wifi));
+    gboolean web = gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_web));
+    gboolean need_shell =
+        gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_net)) || wifi || web ||
+        gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_ble)) ||
+        gtk_check_button_get_active(GTK_CHECK_BUTTON(app->bld_flpr));
+    if (need_shell) {
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_shell), TRUE);
+    }
+    gtk_widget_set_sensitive(app->bld_shell, !need_shell);
+    gtk_widget_set_sensitive(app->bld_net, !wifi && !web);
+    (void)unused;
 }
 
 GtkWidget *build_buildbar(App *app)
@@ -617,7 +725,8 @@ GtkWidget *build_buildbar(App *app)
     app->bld_usb = gtk_check_button_new_with_label("USB console");
     app->bld_web = gtk_check_button_new_with_label("web (HTTPS)");
     app->bld_ble = gtk_check_button_new_with_label("Bluetooth");
-    gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_ble), TRUE); /* Blue default */
+    app->bld_pkhw = gtk_check_button_new_with_label("HW PK");
+    app->bld_flpr = gtk_check_button_new_with_label("FLPR");
     gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_shell), TRUE);
     gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_net), TRUE);
     gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_color), TRUE);
@@ -642,9 +751,14 @@ GtkWidget *build_buildbar(App *app)
         "cert-TLS HTTPS profile: TLS/crypto + HTTP + DNS + RTC time (forces BASIC "
         "on for HTTPGET$/BROWSE). Rides WiFi on RP2350W, or SLIP elsewhere.");
     gtk_widget_set_tooltip_text(app->bld_ble,
-        "Apollo510 Blue only: build the EM9305 BLE radio + Nordic UART Service "
-        "+ the `ble` command (TIKU_DRV_BLE_EM9305_ENABLE=1). Run `ble uart` on "
-        "the board, then use the toolbar BLE button for a wireless shell.");
+        "RP2350: CYW43439 Bluetooth HCI stack. Apollo510 Blue: EM9305 BLE + "
+        "Nordic UART Service wireless shell.");
+    gtk_widget_set_tooltip_text(app->bld_pkhw,
+        "nRF54L15 only: CRACEN hardware ECDSA verify. Requires a separately "
+        "licensed arch/nordic/cracen_pk_microcode.h; otherwise falls back safely.");
+    gtk_widget_set_tooltip_text(app->bld_flpr,
+        "nRF54L15 only: build the FLPR RISC-V coprocessor image; requires the "
+        "RISC-V cross-toolchain.");
     gtk_box_append(GTK_BOX(frow), app->bld_shell);
     gtk_box_append(GTK_BOX(frow), app->bld_net);
     gtk_box_append(GTK_BOX(frow), app->bld_basic);
@@ -653,8 +767,15 @@ GtkWidget *build_buildbar(App *app)
     gtk_box_append(GTK_BOX(frow), app->bld_usb);
     gtk_box_append(GTK_BOX(frow), app->bld_web);
     gtk_box_append(GTK_BOX(frow), app->bld_ble);
+    gtk_box_append(GTK_BOX(frow), app->bld_pkhw);
+    gtk_box_append(GTK_BOX(frow), app->bld_flpr);
     /* keep the BASIC box in sync with web's forced-on coupling (see above) */
     g_signal_connect(app->bld_web, "toggled", G_CALLBACK(on_web_locks_basic), app);
+    g_signal_connect(app->bld_net, "toggled", G_CALLBACK(on_feature_dependency), app);
+    g_signal_connect(app->bld_wifi, "toggled", G_CALLBACK(on_feature_dependency), app);
+    g_signal_connect(app->bld_web, "toggled", G_CALLBACK(on_feature_dependency), app);
+    g_signal_connect(app->bld_ble, "toggled", G_CALLBACK(on_feature_dependency), app);
+    g_signal_connect(app->bld_flpr, "toggled", G_CALLBACK(on_feature_dependency), app);
     on_web_locks_basic(NULL, app);
 
     app->bld_btn = gtk_button_new_with_label("Build & Flash");
@@ -672,6 +793,8 @@ GtkWidget *build_buildbar(App *app)
     gtk_check_button_set_active(GTK_CHECK_BUTTON(app->bld_radios[0]), TRUE);
     app->bld_set_programmatic = FALSE;
     bld_autoselect(app);
+    bld_update_ble_ui(app);
+    on_feature_dependency(NULL, app);
     return box;
 }
 

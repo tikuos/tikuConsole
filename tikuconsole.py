@@ -9,7 +9,7 @@ Authors: Ambuj Varshney <ambuj@tiku-os.org>
 tikuconsole.py - launcher for the GTK4 serial console (a picocom replacement)
 
 A branded desktop terminal for any TikuOS board.  It auto-detects the serial
-port, the platform (MSP430 / RP2350 / Apollo) and its baud, then gives you a
+port, the platform (MSP430 / RP2350 / Apollo / Nordic) and its baud, then gives you a
 colour console you can type straight into -- no picocom/minicom needed.
 
 Flip on "Networking" and it additionally brings up SLIP/IP over the very same

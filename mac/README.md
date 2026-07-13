@@ -51,7 +51,7 @@ is on `PATH` so `pkg-config` resolves `gtk4`.
    (Needs the tikuOS tree + that board's toolchain; the Makefile does the
    flashing. The two Apollo variants — and the three MSP430 variants — share a
    USB id, so the family is detected but pick the exact variant by hand.)
-1. Plug in a board — the port and platform auto-fill (Apollo / MSP430 / RP2350
+1. Plug in a board — the port and platform auto-fill (Apollo / Nordic / MSP430 / RP2350
    are fingerprinted by USB id), and the baud follows. Click **Connect**.
 2. Type into the console — keystrokes go to the board from anywhere in the
    window; the boot log is ANSI-coloured like `picocom`.
@@ -105,3 +105,8 @@ board is a host on your Mac: `ping 172.16.7.2`. Quit with **Ctrl-]**.
 `TIKUCONSOLE_NO_SPLASH=1` skips the splash; `TIKUCONSOLE_SMOKE_MS=N` builds the
 window and quits after N ms (CI smoke). Set `TIKUOS_DIR` to point the build bar
 at the repo root if it isn't found automatically.
+
+The native build bar mirrors TikuBench's complete board set, including the
+nRF54L15-DK, and gates RP2350 WiFi/USB/Bluetooth, Apollo510 Blue BLE, HTTPS,
+CRACEN public-key, and FLPR flags by board. When the GUI itself was launched
+with `sudo`, make is run as `SUDO_USER` so build products remain user-owned.

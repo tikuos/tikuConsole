@@ -25,6 +25,10 @@ import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import Gtk, GLib, Gio  # noqa: E402
 
+from tcon.build_options import (BuildFeatures, board_key_for_platform,
+                                feature_support, invoker_prefix, make_flags,
+                                profile_name)
+
 
 # --- locate + import TikuBench's board engine (sibling repo under the root) ---
 def _import_tikubench():
@@ -82,6 +86,9 @@ class BuildMixin:
         self.bld_color = Gtk.CheckButton(label="colour")
         self.bld_usb = Gtk.CheckButton(label="USB console")
         self.bld_web = Gtk.CheckButton(label="web (HTTPS)")
+        self.bld_ble = Gtk.CheckButton(label="Bluetooth")
+        self.bld_pkhw = Gtk.CheckButton(label="HW PK")
+        self.bld_flpr = Gtk.CheckButton(label="FLPR")
         self.bld_shell.set_active(True)
         self.bld_net.set_active(True)
         self.bld_color.set_active(True)
@@ -107,7 +114,21 @@ class BuildMixin:
                 (self.bld_web,   "HTTPS web stack: cert-TLS 1.3/1.2 + HTTP + DNS "
                                  "+ time + crypto. Enables BASIC HTTPGET$ and "
                                  "BROWSE (the text web browser); forces BASIC on. "
-                                 "Apollo / RP2350 only — heavy build.")):
+                                 "Apollo / RP2350 / nRF54L15 only — heavy build."),
+                (self.bld_ble,   "RP2350: CYW43439 Bluetooth HCI stack. "
+                                 "Apollo510 Blue: EM9305 BLE + Nordic UART "
+                                 "Service wireless shell."),
+                (self.bld_pkhw,  "nRF54L15 only: compile the CRACEN BA414EP "
+                                 "hardware ECDSA-verify path (481x over software, "
+                                 "TIKU_CRACEN_PK_ENABLE=1). The engine is "
+                                 "microcoded and TikuOS ships NO microcode "
+                                 "(Nordic-proprietary): you must ALSO drop your "
+                                 "licensed arch/nordic/cracen_pk_microcode.h, or "
+                                 "it fails safe to software. Standalone/opt-in; "
+                                 "not auto-wired into the TLS path."),
+                (self.bld_flpr,  "nRF54L15 only: build the FLPR RISC-V "
+                                 "coprocessor image (TIKU_FLPR_ENABLE=1); "
+                                 "requires the RISC-V cross-toolchain.")):
             w.set_tooltip_text(tip)
             frow.append(w)
 
@@ -121,6 +142,9 @@ class BuildMixin:
                 self.bld_basic.set_active(True)
             self.bld_basic.set_sensitive(not on)
         self.bld_web.connect("toggled", _web_locks_basic)
+        for w in (self.bld_net, self.bld_wifi, self.bld_web,
+                  self.bld_ble, self.bld_flpr):
+            w.connect("toggled", self._bld_update_dependencies)
         _web_locks_basic()
 
         self.bld_btn = Gtk.Button(label="Build & Flash")
@@ -138,7 +162,10 @@ class BuildMixin:
                 "TikuBench not found next to tikuConsole (%s) -- set "
                 "TIKUBENCH_DIR to enable build/flash." % (_TB_ERR,))
         else:
+            for rb in self.bld_board_radios:
+                rb.connect("toggled", self._bld_board_toggled)
             self._select_default_board()
+            self._bld_gate_features()
         return box
 
     def _select_default_board(self):
@@ -148,9 +175,7 @@ class BuildMixin:
             from tcon.ports import scan_ports, identify_port
             for p in scan_ports():
                 plat = identify_port(p)[0].lower()
-                key = ("apollo4l" if "apollo" in plat else
-                       "rp2350" if ("rp2" in plat or "pico" in plat) else
-                       "msp430fr5994" if "msp" in plat else None)
+                key = board_key_for_platform(plat)
                 if key and key in self.bld_boards:
                     idx = self.bld_boards.index(key)
                     break
@@ -159,6 +184,72 @@ class BuildMixin:
         if self.bld_board_radios:
             self.bld_board_radios[idx].set_active(True)
 
+    def _bld_selected_board(self):
+        """The board object for the currently-selected MCU radio (or None)."""
+        if _TB is None:
+            return None
+        idx = next((i for i, rb in enumerate(self.bld_board_radios)
+                    if rb.get_active()), -1)
+        if 0 <= idx < len(self.bld_boards):
+            return _TB.resolve_board(self.bld_boards[idx])
+        return None
+
+    def _bld_gate_features(self, *_):
+        """Grey out feature toggles the selected board cannot do.
+
+        WiFi (CYW43) and the native USB CDC console exist only on the
+        RP2350W; on MSP430 / Apollo they are meaningless, so disable and clear
+        them (the flags already guard on family, but the UI should say so). On
+        RP2350 both default on -- the USB console is the port this app
+        connects to."""
+        board = self._bld_selected_board()
+        if board is None or not hasattr(self, "bld_wifi"):
+            return
+        support = feature_support(board)
+        is_rp = board.family == "rp2350"
+        for w in (self.bld_wifi, self.bld_usb):
+            w.set_sensitive(is_rp)
+            w.set_active(is_rp)
+        for name, widget in (("web", self.bld_web),
+                             ("bluetooth", self.bld_ble),
+                             ("pkhw", self.bld_pkhw),
+                             ("flpr", self.bld_flpr)):
+            widget.set_sensitive(support[name])
+            if not support[name]:
+                widget.set_active(False)
+        self._bld_update_dependencies()
+
+    def _bld_board_toggled(self, rb):
+        if rb.get_active():
+            self._bld_gate_features()
+
+    def _bld_update_dependencies(self, *_):
+        """Expose implicit shell/network dependencies in the controls."""
+        if not hasattr(self, "bld_shell"):
+            return
+        needs_shell = any(w.get_active() for w in
+                          (self.bld_net, self.bld_wifi, self.bld_web,
+                           self.bld_ble, self.bld_flpr))
+        if needs_shell:
+            self.bld_shell.set_active(True)
+        self.bld_shell.set_sensitive(not needs_shell)
+        self.bld_net.set_sensitive(not (self.bld_wifi.get_active()
+                                        or self.bld_web.get_active()))
+
+    def _bld_features(self):
+        return BuildFeatures(
+            shell=self.bld_shell.get_active(),
+            networking=self.bld_net.get_active(),
+            wifi=self.bld_wifi.get_active(),
+            basic=self.bld_basic.get_active(),
+            color=self.bld_color.get_active(),
+            usb=self.bld_usb.get_active(),
+            web=self.bld_web.get_active(),
+            bluetooth=self.bld_ble.get_active(),
+            pkhw=self.bld_pkhw.get_active(),
+            flpr=self.bld_flpr.get_active(),
+        )
+
     def _bld_flags(self, board):
         """Translate the MCU + feature checkboxes into make variables.
 
@@ -166,72 +257,14 @@ class BuildMixin:
         (defaults ON on Apollo/ambiq) -- are emitted explicitly as =0/1 so an
         unchecked box actively turns the feature off rather than letting the
         platform default win.  colour is explicit too for the same reason."""
-        flags = [
-            "HAS_TESTS=0", "HAS_EXAMPLES=0",
-            "TIKU_SHELL_ENABLE=%d"       % (1 if self.bld_shell.get_active()
-                                            else 0),
-            "TIKU_SHELL_BASIC_ENABLE=%d" % (1 if (self.bld_basic.get_active() or
-                                                  self.bld_web.get_active())
-                                            else 0),
-            "TIKU_SHELL_COLOR=%d"        % (1 if self.bld_color.get_active()
-                                            else 0),
-        ]
-        extra = []
-        is_rp = board.family == "rp2350"
-        wifi = is_rp and self.bld_wifi.get_active()
-        if self.bld_web.get_active():
-            # HTTPS web profile: cert-TLS 1.3/1.2 + HTTP + DNS + time + crypto,
-            # so BASIC HTTPGET$ / BROWSE reach the real web. Lean net but TCP
-            # stays on (TLS needs it -- unlike the WiFi-panel profile, which
-            # drops TCP). On RP2350 it rides WiFi (if WiFi is checked); on
-            # Apollo it rides SLIP (the shell 'slip' command) over the wire.
-            flags += [
-                "TIKU_KIT_NET_ENABLE=1", "TIKU_KIT_NET_MIN=1",
-                "TIKU_KITS_NET_DNS_ENABLE=1", "TIKU_KITS_NET_HTTP_ENABLE=1",
-                "TIKU_KIT_CRYPTO_ENABLE=1", "HAS_TLS=1", "TIKU_KIT_TIME_ENABLE=1",
-            ]
-            if wifi:
-                flags += ["TIKU_DRV_WIFI_CYW43_ENABLE=1",
-                          "TIKU_KITS_NET_WIFI_ENABLE=1",
-                          "TIKU_KITS_NET_DHCP_ENABLE=1"]
-        elif wifi:
-            # The HW-verified lean WiFi profile: CYW43 driver + the net-min IP
-            # stack (ipv4/icmp/udp) + DHCP/DNS + the time kit for NTP, with the
-            # heavy autostarted servers (TCP/CoAP/MQTT/syslog/TFTP) dropped so
-            # the cooperative USB console stays responsive.  Deliberately NOT
-            # TIKU_SHELL_NET_TEST -- that combo starves the console on RP2350.
-            flags += [
-                "TIKU_DRV_WIFI_CYW43_ENABLE=1", "TIKU_KITS_NET_WIFI_ENABLE=1",
-                "TIKU_KIT_NET_ENABLE=1", "TIKU_KIT_NET_MIN=1",
-                "TIKU_KITS_NET_DHCP_ENABLE=1", "TIKU_KITS_NET_DNS_ENABLE=1",
-                "TIKU_KIT_TIME_ENABLE=1",
-            ]
-            extra += ["-DTIKU_KITS_NET_TCP_ENABLE=0", "-DTIKU_SHELL_CMD_SYSLOG=0",
-                      "-DTIKU_SHELL_CMD_MQTT=0", "-DTIKU_SHELL_CMD_COAP=0",
-                      "-DTIKU_SHELL_CMD_TFTP=0"]
-        elif self.bld_net.get_active():
-            flags += ["TIKU_KIT_NET_ENABLE=1", "TIKU_SHELL_NET_TEST=1"]
-        if self.bld_basic.get_active() and board.family == "msp430":
-            flags.append("MEMORY_MODEL=large")      # BASIC needs it on MSP430
-        # RP2350 console rides the native USB CDC -- the port this app connects
-        # to.  Without it the Makefile defaults the console to the UART0 pins
-        # and NO USB serial device enumerates, so you can't connect.  Uncheck
-        # 'USB console' only for an external UART/FT232 rig.
-        if is_rp and self.bld_usb.get_active():
-            flags.append("TIKU_CONSOLE=usb")
-        flags.append("MCU=%s" % board.mcu)
-        # Flash the board at the baud selected in the toolbar, not the board
-        # default -- otherwise raising the baud (e.g. 460800) speeds up the
-        # console/gateway side while the board stays at 115200 and the link is
-        # garbage. Fall back to the default if the field is non-numeric.
+        # Flash the board at the baud selected in the toolbar.  Fall back to
+        # the board default if the field is not numeric.
         try:
             _ubaud = int(str(self.baud.get_text()).strip())
         except (ValueError, AttributeError, TypeError):
             _ubaud = board.default_baud
-        flags.append("UART_BAUD=%d" % _ubaud)
-        if extra:
-            flags.append("EXTRA_CFLAGS=%s" % " ".join(extra))
-        return flags
+        self._bld_baud = _ubaud                 # for the post-flash reconnect
+        return make_flags(board, self._bld_features(), _ubaud)
 
     # ---- build + flash, streamed into the console -------------------------
     def on_build_flash(self, _btn):
@@ -245,22 +278,7 @@ class BuildMixin:
         board = _TB.resolve_board(self.bld_boards[idx])
         flags = self._bld_flags(board)
 
-        is_rp = board.family == "rp2350"
-        wifi_on = is_rp and self.bld_wifi.get_active()
-        feats = []
-        if self.bld_shell.get_active():
-            feats.append("shell")
-        if wifi_on:
-            feats.append("wifi")                 # supersedes net on RP2350
-        elif self.bld_net.get_active():
-            feats.append("net")
-        if self.bld_basic.get_active():
-            feats.append("BASIC")
-        if self.bld_color.get_active():
-            feats.append("colour")
-        if is_rp and self.bld_usb.get_active():
-            feats.append("usb")
-        profile = "+".join(feats) or "bare"
+        profile = profile_name(board, self._bld_features())
 
         # Free the port: flashing drives the same USB debugger / back-channel
         # the console holds open (eZ-FET ACM, J-Link VCOM).  Reconnect after.
@@ -294,7 +312,10 @@ class BuildMixin:
                 Gio.SubprocessFlags.STDOUT_PIPE
                 | Gio.SubprocessFlags.STDERR_MERGE)
             launcher.set_cwd(_TB.PROJ_DIR)                  # the tikuOS root
-            proc = launcher.spawnv(argv)
+            # The application may be root only for TUN/NAT.  Match TikuBench:
+            # build/flash as the invoking user so toolchains/plugins resolve
+            # from their HOME and no root-owned build artifacts are left.
+            proc = launcher.spawnv(invoker_prefix() + argv)
         except Exception as e:
             self.append("\x1b[1;31m%s: %s\x1b[0m\n" % (label, e))
             return self._bld_done(False)
@@ -342,7 +363,13 @@ class BuildMixin:
         # re-enumerates, so the port can be briefly absent -- poll for it
         # instead of a single shot, then hand over to Connect if it never
         # settles.  (TikuBench waits ~2 s here for the same reason.)
-        self.baud.set_text(str(self._bld_board.default_baud))
+        # Reconnect at the baud the firmware was *built* with, not the board
+        # default -- otherwise a non-9600 UART_BAUD build (e.g. 115200) comes
+        # up as garbage and you have to fix the baud + reconnect by hand.  The
+        # sticky flag stops the post-flash port rescan from reverting it.
+        self.baud.set_text(str(getattr(self, "_bld_baud",
+                                       self._bld_board.default_baud)))
+        self._bld_baud_sticky = True
         self._set_status("flashed %s -- waiting for the port…"
                          % self._bld_board.key)
         self._bld_try = 0

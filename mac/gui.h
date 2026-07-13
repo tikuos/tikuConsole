@@ -170,11 +170,13 @@ typedef struct App {
     int          bld_nflag;
     char        *bld_flagv[40];        /* g_strdup'd make flags */
     int          bld_nradios;
-    GtkWidget   *bld_radios[8];        /* one MCU radio per board */
+    GtkWidget   *bld_radios[16];       /* one MCU radio per board */
     GtkWidget   *bld_btn;
     GtkWidget   *bld_shell, *bld_net, *bld_basic, *bld_color, *bld_wifi, *bld_usb;
     GtkWidget   *bld_web;              /* web (HTTPS/TLS) firmware profile */
-    GtkWidget   *bld_ble;             /* Bluetooth (EM9305) -- Blue board only */
+    GtkWidget   *bld_ble;              /* Bluetooth: RP2350 or Apollo510 Blue */
+    GtkWidget   *bld_pkhw;             /* nRF54L15 CRACEN public-key path */
+    GtkWidget   *bld_flpr;             /* nRF54L15 FLPR coprocessor image */
     GSubprocess *bld_proc;
     char         proj_dir[1024];       /* the tikuOS root (where make runs) */
     char         bld_board_key[32];
@@ -232,7 +234,7 @@ void gui_disconnect(App *app);            /* free the port before flashing */
 /* --- gui_build.c --- */
 GtkWidget *build_buildbar(App *app);
 void bld_autoselect(App *app);            /* select the attached board's family */
-void bld_update_ble_ui(App *app);         /* show BLE controls only for the Blue board */
+void bld_update_ble_ui(App *app);         /* refresh board-specific build controls */
 void bld_debug_dump(App *app);            /* smoke: print proj_dir + flags */
 
 /* --- gui_splash.c --- */
