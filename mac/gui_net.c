@@ -734,5 +734,24 @@ GtkWidget *build_netpanel(App *app)
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(psw),
                                   GTK_WIDGET(app->ping_view));
     gtk_box_append(GTK_BOX(nbox), psw);
-    return nbox;
+
+    /* The panel's stacked minimums (Wi-Fi pane + SLIP + NAT + ping) sum to
+     * ~1000 px -- taller than a laptop work area.  Unscrolled, showing it on
+     * connect forced the window past the bottom of the screen on macOS, so
+     * the console's prompt line (where keystrokes echo) sat below the
+     * monitor edge until Enter pushed it up (Linux WMs clamp windows into
+     * the work area, which is why only the Mac showed it).  Wrap the panel
+     * in a vertical scroller so its minimum stays small: when the window is
+     * short the panel scrolls instead of growing the window.  The caller's
+     * visibility toggles target this wrapper. */
+    GtkWidget *scroller = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller),
+                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_propagate_natural_width(
+        GTK_SCROLLED_WINDOW(scroller), TRUE);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(scroller),
+                                               220);
+    gtk_widget_set_vexpand(scroller, TRUE);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroller), nbox);
+    return scroller;
 }
