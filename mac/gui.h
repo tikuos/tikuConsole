@@ -44,6 +44,7 @@ typedef struct App {
     /* serial link (or a BLE-backed socket fd when ble_on) */
     int    ser_fd;
     guint  ser_watch;
+    gboolean conn_busy;        /* threaded serial open in flight (gui.c) */
     gboolean ble_on;           /* current session is BLE (CoreBluetooth) */
     GtkWidget *ble_btn;        /* toolbar "BLE" connect/disconnect button */
 

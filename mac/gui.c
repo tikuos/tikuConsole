@@ -606,48 +606,108 @@ static gboolean on_serial_io(gint fd, GIOCondition cond, gpointer user)
 /* Connect / disconnect                                                      */
 /* ------------------------------------------------------------------------- */
 
+/* Serial opens run on a worker thread.  On macOS, open()/tcsetattr() on a
+ * /dev/cu.usbmodem* device that is slow to answer its CDC class requests
+ * (SET_CONTROL_LINE_STATE on open, SET_LINE_CODING on tcsetattr) block for
+ * ~30 s EACH inside the AppleUSBACM driver -- O_NONBLOCK does not cover
+ * control transfers.  A synchronous open froze the whole UI for a minute+
+ * against such firmware (e.g. a TikuOS build whose polled USB stack was not
+ * being serviced); Linux never showed it because cdc_acm gives up after 5 s
+ * and carries on.  The thread hands the fd back to the main loop via
+ * g_idle_add(). */
+typedef struct {
+    App     *app;
+    char     path[256];
+    unsigned baud;
+    int      fd;
+    int      err;
+} conn_job_t;
+
+static gboolean connect_finish(gpointer user)
+{
+    conn_job_t *job = user;
+    App *app = job->app;
+
+    app->conn_busy = FALSE;
+    gtk_widget_set_sensitive(app->connect_btn, TRUE);
+
+    if (app->ser_fd >= 0) {           /* BLE (or another path) won meanwhile */
+        if (job->fd >= 0) {
+            close(job->fd);
+        }
+    } else if (job->fd < 0) {
+        char e[400];
+        snprintf(e, sizeof(e), "error opening %s: %s", job->path,
+                 strerror(job->err));
+        set_status(app, e, TRUE);
+    } else {
+        app->ser_fd = job->fd;
+        app->utf8_carry_n = 0;      /* fresh UTF-8 decoder per connection */
+        app->ser_watch = g_unix_fd_add(job->fd, G_IO_IN, on_serial_io, app);
+        gtk_button_set_label(GTK_BUTTON(app->connect_btn), "Disconnect");
+        gtk_widget_remove_css_class(GTK_WIDGET(app->cview), "console-off");
+        update_leds(app);
+
+        char st[420];
+        snprintf(st, sizeof(st), "connected to %s @ %u baud", job->path,
+                 job->baud);
+        set_status(app, st, FALSE);
+        static const char *hello =
+            "[tikuconsole] connected (console mode) -- type away.\n";
+        console_append(app, hello, (int)strlen(hello));
+        gtk_widget_grab_focus(GTK_WIDGET(app->cview));
+
+        /* show the side panel so the Wi-Fi controls are reachable, and run a
+         * quiet status sync in case the board auto-rejoined Wi-Fi on a cold
+         * boot. */
+        gtk_widget_set_visible(app->netpanel, TRUE);
+        g_timeout_add(1500, wifi_sync_cb, app);
+
+        if (gtk_switch_get_active(GTK_SWITCH(app->net_sw))) { /* net pre-set */
+            net_apply(app, TRUE);
+        }
+    }
+    g_free(job);
+    return G_SOURCE_REMOVE;
+}
+
+static gpointer connect_thread(gpointer user)
+{
+    conn_job_t *job = user;
+    job->fd = serial_open(job->path, job->baud);
+    job->err = errno;
+    g_idle_add(connect_finish, job);
+    return NULL;
+}
+
 static void do_connect(App *app)
 {
     if (app->ser_fd >= 0) {
         teardown(app);
         return;
     }
+    if (app->conn_busy) {               /* an open is already in flight */
+        return;
+    }
     if (!app->port_path[0]) {
         set_status(app, "no serial port -- plug in a board and rescan", TRUE);
         return;
     }
-    unsigned baud = (unsigned)atoi(baud_get_text(app));
-    int fd = serial_open(app->port_path, baud);
-    if (fd < 0) {
-        char e[400];
-        snprintf(e, sizeof(e), "error opening %s: %s", app->port_path,
-                 strerror(errno));
-        set_status(app, e, TRUE);
-        return;
-    }
-    app->ser_fd = fd;
-    app->utf8_carry_n = 0;          /* fresh UTF-8 decoder per connection */
-    app->ser_watch = g_unix_fd_add(fd, G_IO_IN, on_serial_io, app);
-    gtk_button_set_label(GTK_BUTTON(app->connect_btn), "Disconnect");
-    gtk_widget_remove_css_class(GTK_WIDGET(app->cview), "console-off");
-    update_leds(app);
 
+    conn_job_t *job = g_new0(conn_job_t, 1);
+    job->app = app;
+    strlcpy(job->path, app->port_path, sizeof(job->path));
+    job->baud = (unsigned)atoi(baud_get_text(app));
+    job->fd = -1;
+
+    app->conn_busy = TRUE;
+    gtk_widget_set_sensitive(app->connect_btn, FALSE);
     char st[420];
-    snprintf(st, sizeof(st), "connected to %s @ %u baud", app->port_path, baud);
+    snprintf(st, sizeof(st),
+             "opening %s\xe2\x80\xa6 (a busy board can take a moment)",
+             job->path);
     set_status(app, st, FALSE);
-    static const char *hello =
-        "[tikuconsole] connected (console mode) -- type away.\n";
-    console_append(app, hello, (int)strlen(hello));
-    gtk_widget_grab_focus(GTK_WIDGET(app->cview));
-
-    /* show the side panel so the Wi-Fi controls are reachable, and run a quiet
-     * status sync in case the board auto-rejoined Wi-Fi on a cold boot. */
-    gtk_widget_set_visible(app->netpanel, TRUE);
-    g_timeout_add(1500, wifi_sync_cb, app);
-
-    if (gtk_switch_get_active(GTK_SWITCH(app->net_sw))) {  /* net pre-selected */
-        net_apply(app, TRUE);
-    }
+    g_thread_unref(g_thread_new("ser-open", connect_thread, job));
 }
 
 /* Connect over BLE (CoreBluetooth) instead of a serial port: the Nordic UART
@@ -904,10 +964,13 @@ gboolean gui_autoconnect_step(App *app)
     if (app->ser_fd >= 0) {
         return TRUE;
     }
+    if (app->conn_busy) {
+        return TRUE;    /* a threaded open is in flight -- it will finish */
+    }
     refresh_ports(app);
     if (app->port_path[0]) {
         do_connect(app);
-        if (app->ser_fd >= 0) {
+        if (app->conn_busy || app->ser_fd >= 0) {
             gtk_widget_grab_focus(GTK_WIDGET(app->cview));
             return TRUE;
         }
