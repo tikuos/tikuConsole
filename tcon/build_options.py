@@ -162,14 +162,67 @@ def profile_name(board, features):
     return "+".join(names) or "bare"
 
 
+def _nordic_key_via_nrfutil():
+    """Distinguish the nRF54L DKs by asking nrfutil for the silicon name.
+
+    The nRF54L15-DK and nRF54LM20-DK share one J-Link USB id, so the USB
+    fingerprint alone cannot tell them apart.  nrfutil's device list reports
+    the devkit's deviceName (nRF54L15 / nRF54LM20A / nRF54LM20B...), which
+    maps cleanly onto the board key.  Returns None when nrfutil is missing,
+    slow, ambiguous (several DKs) or reports something unexpected -- the
+    caller then falls back to the USB-only default.
+    """
+    import json
+    import os
+    import shutil
+    import subprocess
+
+    exe = shutil.which("nrfutil")
+    if not exe:
+        for cand in (os.path.expanduser("~/.nrfutil/bin/nrfutil"),
+                     os.path.join(os.path.dirname(__file__),
+                                  "..", "..", "temp", "nrfutil")):
+            if os.path.exists(cand):
+                exe = cand
+                break
+    if not exe:
+        return None
+    try:
+        out = subprocess.run([exe, "--json", "device", "device-info"],
+                             capture_output=True, text=True, timeout=15)
+    except Exception:
+        return None
+    names = []
+    for line in out.stdout.splitlines():
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if ev.get("type") != "task_end":
+            continue
+        # task_end -> data -> data -> deviceInfo -> jlink -> deviceName
+        inner = (ev.get("data") or {}).get("data") or {}
+        jlink = (inner.get("deviceInfo") or {}).get("jlink") or {}
+        name = str(jlink.get("deviceName", ""))
+        if name:
+            names.append(name.upper())
+    if len(names) != 1:
+        return None                    # none, or several DKs: stay generic
+    if "NRF54LM20" in names[0]:
+        return "nrf54lm20a"            # LM20A image runs the DK's LM20B too
+    if "NRF54L15" in names[0]:
+        return "nrf54l15"
+    return None
+
+
 def board_key_for_platform(label):
     """Map a USB fingerprint label to TikuBench's default board key."""
     platform = (label or "").lower()
     if "nrf54" in platform or "nordic" in platform:
-        # The nRF54L15-DK and nRF54LM20-DK share one J-Link USB id, so USB
-        # alone can't tell them apart -- default to the L15 and let the user
-        # pass --board nrf54lm20a for the LM20-DK.
-        return "nrf54l15"
+        # The nRF54L15-DK and nRF54LM20-DK share one J-Link USB id; ask
+        # nrfutil which silicon is attached, and default to the L15 when it
+        # can't say (user can always pass --board nrf54lm20a).
+        return _nordic_key_via_nrfutil() or "nrf54l15"
     if "apollo" in platform:
         return "apollo510"
     if "rp2" in platform or "pico" in platform:
