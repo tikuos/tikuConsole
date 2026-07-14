@@ -21,7 +21,7 @@ SPDX-License-Identifier: Apache-2.0
 _USB_IDS = [
     (0x2E8A, 0x0009, "RP2350 (USB CDC)", 115200),
     (0x2E8A, None,   "RP2040/RP2350",    115200),
-    (0x1366, 0x1069, "nRF54L15-DK (J-Link)", 115200),
+    (0x1366, 0x1069, "nRF54L DK (J-Link)", 115200),  # L15-DK or LM20-DK (same J-Link id)
     (0x1366, None,   "Apollo (J-Link VCOM)", 115200),
     (0x0451, None,   "MSP430 (eZ-FET)",  9600),
     (0x0403, 0x6001, "MSP430 (FT232)",   9600),

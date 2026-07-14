@@ -166,6 +166,9 @@ def board_key_for_platform(label):
     """Map a USB fingerprint label to TikuBench's default board key."""
     platform = (label or "").lower()
     if "nrf54" in platform or "nordic" in platform:
+        # The nRF54L15-DK and nRF54LM20-DK share one J-Link USB id, so USB
+        # alone can't tell them apart -- default to the L15 and let the user
+        # pass --board nrf54lm20a for the LM20-DK.
         return "nrf54l15"
     if "apollo" in platform:
         return "apollo510"
