@@ -1,17 +1,9 @@
 /*
- * gui_net.c - TikuConsole networking: the side-panel, the host utun bridge,
- * the rootless UDP relay, and pf-based NAT.
+ * gui_net.c - TikuConsole networking: side-panel, utun bridge, UDP relay, NAT.
  *
- * Ports tcon/ui.py's networking pane, tcon/connection.py's TUN path, and
- * tcon/nat.py.  Two ways the board reaches the world:
- *
- *   * rootless: every off-link UDP datagram (DNS, NTP, ...) is relayed through
- *     ordinary host sockets and framed back over SLIP -- no privileges.
- *   * root: a utun device lets the macOS kernel route, and pf NAT (the iptables
- *     MASQUERADE equivalent) gives the board full internet incl. ICMP.
- *
- * The board's link MTU is tiny (128 B), so oversize DNS replies are trimmed to
- * their first A record before framing -- exactly what an IoT border router does.
+ * Two ways the board reaches the world: rootless, relaying every off-link UDP
+ * datagram through host sockets back over SLIP; or root, where a utun device plus
+ * pf NAT gives full internet.  The 128 B link MTU means DNS replies are trimmed.
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  * SPDX-License-Identifier: Apache-2.0
@@ -525,16 +517,16 @@ static gboolean on_nat_switch(GtkSwitch *sw, gboolean state, gpointer user)
     wan_iface(wan, sizeof(wan));
     if (state) {
         /* macOS pf NAT: the iptables MASQUERADE equivalent.  pf is disabled by
-         * default on a dev Mac, so loading our rules + enabling pf is reversible
-         * with `pfctl -d`.  The `pass ... keep state` line is essential: a bare
-         * `nat` rule translated the TLS handshake fine but then dropped later
-         * return segments of a long-lived flow -- the HTTP response came back
-         * empty (HTTP 0,0 B) or the connection RST -- because pf needs an
-         * explicit stateful pass to match the return path.  It is the analogue
-         * of the Linux gateway's `FORWARD ... -m conntrack --ctstate
-         * ESTABLISHED,RELATED -j ACCEPT` rule (tcon/nat.py); ICMP survived the
-         * bare rule because it is stateless, which is why ping worked but
-         * HTTPS responses vanished. */
+         * default on a dev Mac, so loading these rules + enabling pf is
+         * reversible with `pfctl -d`.  The `pass ... keep state` line is
+         * essential: a bare `nat` rule translated the TLS handshake fine but
+         * then dropped later return segments of a long-lived flow -- the HTTP
+         * response came back empty (HTTP 0,0 B) or the connection RST --
+         * because pf needs an explicit stateful pass to match the return path.
+         * It is the analogue of the Linux gateway's `FORWARD ... -m conntrack
+         * --ctstate ESTABLISHED,RELATED -j ACCEPT` rule (tcon/nat.py); ICMP
+         * survived the bare rule because it is stateless, which is why ping
+         * worked but HTTPS responses vanished. */
         bridge_run("sysctl -w net.inet.ip.forwarding=1 >/dev/null 2>&1");
         bridge_run("printf 'nat on %s from %s to any -> (%s)\\n"
                    "pass from %s to any keep state\\n' | "

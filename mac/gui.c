@@ -1,15 +1,9 @@
 /*
  * gui.c - TikuConsole, the GTK4 serial console for TikuOS (macOS).
  *
- * The C/GTK4 twin of the Linux Python tcon/ app.  A serial console that behaves
- * like a terminal: a window-level key controller forwards keystrokes to the
- * board, an ANSI/SGR decoder colours the output, and the same wire is always
- * SLIP-demuxed so IP frames are separated from console text.  It wraps the
- * shared bridge core (bridge.c).
- *
- * This file owns the window, the console, the keyboard, the serial link and the
- * port picker.  The networking side-panel (utun bridge, UDP relay, NAT) lives
- * in gui_net.c and the in-app pinger in gui_ping.c -- all sharing one App.
+ * A serial console that behaves like a terminal: keystrokes forward to the board,
+ * an ANSI/SGR decoder colours the output, and the wire is SLIP-demuxed so IP
+ * frames stay separate from text.  Owns the window, console, link and picker.
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  * SPDX-License-Identifier: Apache-2.0
@@ -711,8 +705,8 @@ static void do_connect(App *app)
 }
 
 /* Connect over BLE (CoreBluetooth) instead of a serial port: the Nordic UART
- * Service is bridged to a socket fd (ble_mac.m) that we drive through the exact
- * same console path as a serial link. */
+ * Service is bridged to a socket fd (ble_mac.m) driven through the exact same
+ * console path as a serial link. */
 static void do_connect_ble(App *app)
 {
     if (app->ser_fd >= 0) {                 /* already connected -> disconnect */

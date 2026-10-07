@@ -54,7 +54,7 @@ static BleUart *g_ble;
 - (void)centralManagerDidUpdateState:(CBCentralManager *)c {
     if (c.state == CBManagerStatePoweredOn) {
         g_status = ST_SCAN;
-        /* The device advertises only its name (no 128-bit service UUID), so we
+        /* The device advertises only its name (no 128-bit service UUID), so the
          * must scan for everything and match by name. */
         [c scanForPeripheralsWithServices:nil options:nil];
     } else {

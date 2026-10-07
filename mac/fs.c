@@ -270,7 +270,7 @@ long fs_get(int fd, const char *name, uint8_t *buf, size_t bufsz,
         return -1;
     }
 
-    /* Accumulate until we have a complete "send: N\n" header (or an error). */
+    /* Accumulate until a complete "send: N\n" header arrives (or an error). */
     uint8_t hdr[600];
     size_t  hn = 0;
     long    N = -1, t0 = now_ms();

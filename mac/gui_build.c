@@ -1,17 +1,9 @@
 /*
  * gui_build.c - TikuConsole firmware build/flash bar.
  *
- * Ports tcon/build.py: a "Firmware" bar above the connection bar -- pick an
- * MCU, flip the feature checkboxes (shell / networking / BASIC / colour), and
- * hit Build & Flash.  It runs `make clean` -> `make <flags>` -> `make flash
- * <flags>` in the tikuOS root, streaming the output live into the console
- * (GSubprocess, so the GTK loop stays responsive), and on a clean flash auto-
- * connects to the freshly programmed board.
- *
- * The board table mirrors TikuBench's tikubench.core.board.BOARDS (one source
- * of truth for MCU names + default baud); the Makefile's own `flash` target
- * handles each family's flash path (eZ-FET / BOOTSEL / J-Link), so this only
- * has to drive make.
+ * Pick an MCU, flip the feature checkboxes, and run make clean / make / make
+ * flash through GSubprocess so the GTK loop stays responsive.  The board table
+ * mirrors TikuBench's board list, and the Makefile owns each family's flash path.
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  * SPDX-License-Identifier: Apache-2.0
@@ -442,8 +434,8 @@ static void bld_done(App *app, gboolean ok)
     console_append(app, "\x1b[1;32m\xe2\x94\x80\xe2\x94\x80 build + flash OK "
                    "-- connecting\xe2\x80\xa6 \xe2\x94\x80\xe2\x94\x80\x1b[0m\n",
                    -1);
-    /* The toolbar already holds the baud we flashed at (UART_BAUD), so leave it
-     * be and just auto-connect.  The board reboots after `make flash` and may
+    /* The toolbar already holds the baud the flash ran at (UART_BAUD), so leave
+     * it be and just auto-connect.  The board reboots after `make flash` and may
      * re-enumerate, so poll for the port instead of a single shot. */
     char st[140];
     snprintf(st, sizeof(st), "flashed %s -- waiting for the port\xe2\x80\xa6",
@@ -583,7 +575,7 @@ static void on_mcu_toggled(GtkCheckButton *rb, gpointer user)
 {
     App *app = user;
     if (app->bld_set_programmatic) {
-        return;                                /* our own set_active, not a click */
+        return;                                /* a self-issued set_active, not a click */
     }
     if (!gtk_check_button_get_active(rb)) {
         return;

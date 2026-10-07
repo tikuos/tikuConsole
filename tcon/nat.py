@@ -19,7 +19,7 @@ from tcon.packets import build_ip, build_udp
 from slmux import slip_encode
 
 # Host address in 4-byte network order, for the relay's "is this destined for
-# the world rather than for us?" check.
+# the world rather than for this host?" check.
 _HOST_BYTES = socket.inet_aton(HOST_IP)
 
 # The board's link MTU (keep in sync with the firmware's TIKU_KITS_NET_MTU).
@@ -207,7 +207,7 @@ class NatMixin:
         """Rebuild a DNS response as header + question + first A record.
 
         Returns the smaller message, or None if it is not a clean A-record
-        answer we can shrink."""
+        answer that can be shrunk."""
         if len(dns) < 12:
             return None
         flags = (dns[2] << 8) | dns[3]

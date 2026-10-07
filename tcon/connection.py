@@ -98,7 +98,7 @@ class ConnectionMixin:
 
     # ---- networking apply (shared by the switch + connect) ----------------
     def on_net_toggle(self, _sw, active):
-        # The switch only reflects the user's choice; we never flip it back (a
+        # The switch only reflects the user's choice and is never flipped back (a
         # reentrant set_active() from inside this state-set handler leaves GTK's
         # active/state inconsistent and the switch sticks).  The real work lives
         # in _apply_net, shared with on_connect.

@@ -26,8 +26,9 @@
 
 #define PING_MAX 128            /* ping count is capped at 100 by the spinner */
 
-/* Wi-Fi reply-capture state (gui_wifi.c): which command's output we are
- * currently slicing off the live console stream (WIFI_CAP_NONE = passthrough). */
+/* Wi-Fi reply-capture state (gui_wifi.c): which command's output is
+ * currently being sliced off the live console stream (WIFI_CAP_NONE =
+ * passthrough). */
 enum {
     WIFI_CAP_NONE = 0,
     WIFI_CAP_LIST,
@@ -75,7 +76,7 @@ typedef struct App {
     /* in-app ICMP-over-SLIP ping (rootless) */
     gboolean ping_active;
     guint16  ping_ident;
-    gint64   ping_send_t[PING_MAX];    /* monotonic us per seq */
+    gint64   ping_send_t[PING_MAX];    /* monotonic usec per seq */
     gboolean ping_pending[PING_MAX];
     double   ping_rtts[PING_MAX];
     int      ping_n_rtt;
@@ -184,7 +185,7 @@ typedef struct App {
     int          bld_board_baud;
     int          bld_try;
     gboolean     bld_user_picked;      /* user chose an MCU -> stop auto-select */
-    gboolean     bld_set_programmatic; /* guard: ignore our own radio toggles */
+    gboolean     bld_set_programmatic; /* guard: ignore self-issued radio toggles */
 
     /* /data file browser window */
     GtkWidget   *files_btn;

@@ -1,25 +1,9 @@
 /*
  * slmux.c - SLIP + console multiplexer for TikuOS, macOS edition (CLI).
  *
- * When the board is in `slip` mode it interleaves, on one USB-serial line, both
- * the interactive shell (ASCII text) and SLIP/IP frames (0xC0-delimited).
- * slmux demultiplexes that single wire into two things at once:
- *
- *   * a utun network interface -- so the macOS kernel's own networking rides
- *     it: `ping 172.16.7.2`, `curl http://172.16.7.2`, etc.
- *   * an interactive console -- the board's shell text on stdout, your
- *     keystrokes (stdin) sent back, so you can still type commands.
- *
- * One cable carries the shell AND real networking simultaneously.  The shared
- * SLIP / serial / utun primitives live in bridge.c; this file is just the
- * command-line front end (a select() loop + raw-tty console).  The GTK GUI
- * (tikuconsole) wraps the same bridge core.
- *
- * Needs root (creates a utun device and configures the interface):
- *
- *     sudo ./slmux /dev/cu.usbmodemXXXX
- *
- * Type `slip` once in the console to put the board in SLIP mode.  Quit: Ctrl-].
+ * Demultiplexes one USB-serial wire into a utun interface, so the macOS kernel
+ * routes to the board, and an interactive console at the same time.  Needs root;
+ * the shared SLIP/serial/utun primitives live in bridge.c.
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  * SPDX-License-Identifier: Apache-2.0

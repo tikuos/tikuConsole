@@ -19,7 +19,7 @@
 typedef struct {
     char     device[256]; /* /dev/cu.usbmodemXXXX */
     char     label[64];   /* platform fingerprint, e.g. "Apollo (J-Link VCOM)" */
-    char     serial[128]; /* USB probe serial, used to pair J-Link VCOMs */
+    char     serial[128]; /* USB probe serial, for pairing J-Link VCOMs */
     unsigned baud;        /* default baud for this platform */
     int      vid, pid;    /* USB ids, or -1 if unknown */
 } port_info_t;

@@ -13,7 +13,7 @@ SPDX-License-Identifier: Apache-2.0
 #
 # SEGGER J-Link probes (VID 0x1366) can't be told fully apart by USB id -- the
 # nRF54L15-DK and every Apollo EVB share the vendor, and the nRF54L15-DK's OB
-# J-Link enumerates as 0x1366:0x1069.  We list that specific pid before the
+# J-Link enumerates as 0x1366:0x1069.  That specific pid is listed before the
 # Apollo wildcard so a DK is labelled correctly; if a particular Apollo board is
 # ever seen with the same pid it would need its own specific entry above this.
 # Either way the baud (115200) and the second-ACM console rule are identical, so

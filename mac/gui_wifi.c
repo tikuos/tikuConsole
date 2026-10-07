@@ -1,17 +1,9 @@
 /*
  * gui_wifi.c - the Wi-Fi panel for RP2350W boards.
  *
- * A faithful C/GTK4 port of the Linux tcon/wifi.py WiFiMixin (+ the WiFi
- * status light from tcon/leds.py and the on-the-network readout from
- * tcon/ui.py).  It drives the board's own `wifi`/`ip`/`ping`/`ntp` shell
- * commands and parses the replies straight off the live console stream:
- * wifi_feed() is called for every chunk of console text (see gui.c), and a
- * tiny capture state machine (app->wifi_capture) slices the reply we asked
- * for without disturbing what the user sees.
- *
- * Flow: Scan -> `wifi scan` then `wifi list` -> pick an SSID -> Connect ->
- * `wifi connect[3] <ssid> <pass>`, poll `wifi status` until joined, then
- * `wifi up` + `ip` (retry) for the DHCP lease.  Ping/Time run `ping`/`ntp`.
+ * Drives the board's own wifi/ip/ping/ntp shell commands: wifi_feed() sees every
+ * chunk of console text and a small capture state machine slices out the reply
+ * asked for without disturbing what the user sees.
  *
  * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  * SPDX-License-Identifier: Apache-2.0

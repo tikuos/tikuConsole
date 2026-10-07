@@ -97,7 +97,7 @@ async def run_session(dev):
                                                  response=False)
 
         wtask = asyncio.ensure_future(writer())
-        # Nudge the board so it reprints its prompt into our fresh terminal.
+        # Nudge the board so it reprints its prompt into the fresh terminal.
         outq.put_nowait(b"\r")
         try:
             await done

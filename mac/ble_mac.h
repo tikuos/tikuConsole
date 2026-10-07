@@ -1,18 +1,11 @@
 /*
  * TikuConsole -- macOS CoreBluetooth transport for the tikuOS wireless shell.
  *
- * Presents a board's BLE UART service (exposed by the Apollo510 Blue EVB's
- * `ble uart` command) to the GTK console as an ordinary file
- * descriptor: bytes the device notifies on the TX characteristic become
- * readable on the fd, and bytes written to the fd are forwarded to the RX
- * characteristic. The GUI can then drive a BLE link through the exact same
- * ser_fd path it uses for a serial port.
+ * Presents a board's BLE UART service to the GTK console as an ordinary file
+ * descriptor, so the GUI drives a BLE link through the same ser_fd path it uses
+ * for a serial port.  Implemented in ble_mac.m; CoreBluetooth is asynchronous.
  *
- * Implemented in ble_mac.m (Objective-C + CoreBluetooth). CoreBluetooth is
- * asynchronous, so the fd is returned immediately and traffic begins once the
- * scan/connect/subscribe completes; a failed or dropped link closes the fd
- * (the reader sees EOF).
- *
+ * Authors: Ambuj Varshney <ambuj@tiku-os.org>
  * SPDX-License-Identifier: Apache-2.0
  */
 #ifndef BLE_MAC_H

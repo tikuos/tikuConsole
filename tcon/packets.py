@@ -51,7 +51,7 @@ def build_udp(src_ip, src_port, dst_ip, dst_port, payload):
 
 
 def parse_icmp_echo_reply(pkt, ident):
-    """seq if pkt is an ICMP echo reply (type 0) for our ident, else None.
+    """seq if pkt is an ICMP echo reply (type 0) for the given ident, else None.
     IHL-aware; the board already validated the request checksum."""
     if len(pkt) < 28 or (pkt[0] >> 4) != 4 or pkt[9] != 1:
         return None                                # short / not IPv4 / not ICMP

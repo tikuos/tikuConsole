@@ -73,7 +73,7 @@ def _read_until(ser, markers, timeout=4.0):
 
 
 def _capture_prompt(ser):
-    """Send a bare CR and learn the device's exact prompt string, so we can
+    """Send a bare CR and learn the device's exact prompt string, so later
     strip it even when text is glued to it."""
     global _PROMPT
     ser.reset_input_buffer()
