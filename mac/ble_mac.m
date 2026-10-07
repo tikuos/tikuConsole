@@ -70,7 +70,10 @@ static BleUart *g_ble;
  didDiscoverPeripheral:(CBPeripheral *)p
      advertisementData:(NSDictionary<NSString *, id> *)adv
                   RSSI:(NSNumber *)rssi {
-    NSString *nm = p.name ?: adv[CBAdvertisementDataLocalNameKey];
+    /* The advertised name first: CoreBluetooth caches the GAP name of a
+     * device it has connected to, and a board that has advertised under
+     * another name since would never match. */
+    NSString *nm = adv[CBAdvertisementDataLocalNameKey] ?: p.name;
     BOOL match = (nm && [[nm lowercaseString] hasPrefix:self.want]);
     for (CBUUID *u in adv[CBAdvertisementDataServiceUUIDsKey]) {
         if ([u isEqual:[CBUUID UUIDWithString:UART_SVC]]) { match = YES; }
