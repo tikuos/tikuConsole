@@ -39,12 +39,18 @@ tikuconsole: $(GUI_SRC) $(GUI_HDR) ble_mac.o
 ble_test: ble_mac.m ble_mac.h
 	$(CC) $(CFLAGS) -DBLE_MAC_TEST -fobjc-arc -o $@ ble_mac.m $(BLE_FRAMEWORKS)
 
+# Carry a board's BLE link to a desktop listening on TCP (the applications
+# shell harness's ble lane on macOS, where TikuBench's BlueZ relay has no
+# adapter):  ble_relay --name TIKU-DESK --to 127.0.0.1:7749
+ble_relay: ble_relay.c ble_mac.o ble_mac.h
+	$(CC) $(CFLAGS) -o $@ ble_relay.c ble_mac.o $(BLE_FRAMEWORKS)
+
 # Headless self-test for the /data transfer protocol (no GTK needed):
 #   make fstest && ./fstest /dev/cu.usbmodemXXXX
 fstest: fs.c bridge.c fs.h bridge.h
 	$(CC) $(CFLAGS) -DFS_TEST -o $@ fs.c bridge.c $(FRAMEWORKS)
 
 clean:
-	rm -f slmux tikuconsole fstest ble_test ble_mac.o
+	rm -f slmux tikuconsole fstest ble_test ble_relay ble_mac.o
 
 .PHONY: all clean

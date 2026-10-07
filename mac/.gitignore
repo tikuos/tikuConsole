@@ -4,3 +4,4 @@
 /fstest
 /ble_test
 *.o
+/ble_relay
