@@ -29,8 +29,9 @@ static const char *const STATUS[] = {
 };
 static volatile int g_status = ST_IDLE;
 
-/* Keep each RX write inside one ATT MTU worth of payload. */
-#define BLE_WRITE_CHUNK 180
+/* Bytes read from the caller and not yet written to the board: past this,
+ * reading the caller's fd pauses until the radio drains them. */
+#define BLE_PENDING_CAP 4096
 
 
 @interface BleUart : NSObject <CBCentralManagerDelegate, CBPeripheralDelegate>
@@ -42,6 +43,8 @@ static volatile int g_status = ST_IDLE;
 @property (assign) int                ifd;         /* internal socketpair end */
 @property (strong) dispatch_queue_t   q;
 @property (strong) dispatch_source_t  rxSource;
+@property (strong) NSMutableData     *pending;     /* host -> device backlog */
+@property (assign) BOOL               paused;      /* rxSource suspended */
 @end
 
 /* The single active link (one board at a time). */
@@ -137,8 +140,37 @@ didFailToConnectPeripheral:(CBPeripheral *)p error:(NSError *)err {
     [self teardown];
 }
 
-/* host -> device: forward everything written to the fd onto the RX char. */
+/* Write what waits onto the RX characteristic: each write no longer than
+ * the peer's ATT MTU allows (CoreBluetooth cuts a longer write without
+ * response to that length), and only while the radio's queue takes one (it
+ * drops writes once full); peripheralIsReadyToSendWriteWithoutResponse
+ * calls here again when there is room. */
+- (void)pumpWrites {
+    NSUInteger max = [self.peer
+        maximumWriteValueLengthForType:CBCharacteristicWriteWithoutResponse];
+    if (max == 0) { max = 20; }
+    while (self.pending.length > 0 && self.peer.canSendWriteWithoutResponse) {
+        NSUInteger chunk = self.pending.length < max ? self.pending.length : max;
+        [self.peer writeValue:[self.pending subdataWithRange:NSMakeRange(0, chunk)]
+            forCharacteristic:self.rx
+                         type:CBCharacteristicWriteWithoutResponse];
+        [self.pending replaceBytesInRange:NSMakeRange(0, chunk)
+                                withBytes:NULL length:0];
+    }
+    if (self.paused && self.rxSource && self.pending.length < BLE_PENDING_CAP) {
+        self.paused = NO;
+        dispatch_resume(self.rxSource);
+    }
+}
+
+- (void)peripheralIsReadyToSendWriteWithoutResponse:(CBPeripheral *)p {
+    [self pumpWrites];
+}
+
+/* host -> device: forward everything written to the fd onto the RX char,
+ * reading no further while the backlog is full. */
 - (void)startRxForwarding {
+    self.pending = [NSMutableData data];
     self.rxSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ,
                                            (uintptr_t)self.ifd, 0, self.q);
     __weak BleUart *weak = self;
@@ -149,13 +181,11 @@ didFailToConnectPeripheral:(CBPeripheral *)p error:(NSError *)err {
         ssize_t nr = read(self2.ifd, buf, sizeof(buf));
         if (nr == 0) { [self2 teardown]; return; }         /* peer closed fd */
         if (nr < 0) { if (errno != EAGAIN) { [self2 teardown]; } return; }
-        for (ssize_t off = 0; off < nr; ) {
-            ssize_t chunk = nr - off;
-            if (chunk > BLE_WRITE_CHUNK) { chunk = BLE_WRITE_CHUNK; }
-            [self2.peer writeValue:[NSData dataWithBytes:buf + off length:chunk]
-                 forCharacteristic:self2.rx
-                              type:CBCharacteristicWriteWithoutResponse];
-            off += chunk;
+        [self2.pending appendBytes:buf length:(NSUInteger)nr];
+        [self2 pumpWrites];
+        if (!self2.paused && self2.pending.length >= BLE_PENDING_CAP) {
+            self2.paused = YES;
+            dispatch_suspend(self2.rxSource);
         }
     });
     dispatch_resume(self.rxSource);
@@ -164,6 +194,10 @@ didFailToConnectPeripheral:(CBPeripheral *)p error:(NSError *)err {
 - (void)teardown {
     if (self.rxSource) {
         dispatch_source_cancel(self.rxSource);
+        if (self.paused) {
+            self.paused = NO;
+            dispatch_resume(self.rxSource);   /* a suspended source never ends */
+        }
         self.rxSource = nil;
     }
     if (self.peer && self.central) {
